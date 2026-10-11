@@ -1,0 +1,46 @@
+# CaloChallenge 2022 Dataset 2 (electron showers, 1 GeV - 1 TeV): 45 layers x 16 angular x 9 radial bins.
+# SR acts in the transverse plane and keeps the layers. Measured LR = 4 x 3 per layer + noise + topo-clustering.
+# Ladder 4x3 -> 8x9 -> 16x9 (truth).
+# Model layout: a "video" with the 45 layers as time (C = 1, D = 45); tubelets 5 x 2 x 3 -> 9 x 8 x 3 tokens.
+# The angular token axis is periodic (3D-RoPE with periodic frequencies).
+# E_inc conditions the SR world model (it is known in CaloChallenge), like the AC model's action tokens.
+dataset: calo
+run_name: main
+data:
+  kind: shower
+  source: calo
+  zenodo_record: "6366271"
+  files: [dataset_2_1.hdf5, dataset_2_2.hdf5]   # 2_1 -> train + val, 2_2 -> test (CaloChallenge convention)
+  native_shape: [45, 16, 9]
+  planes: 45
+  hr_shape: [16, 9]
+  circular_u: true               # the angular axis is periodic
+  r_edges: [0.0, 4.65, 9.3, 13.95, 18.6, 27.9, 37.2, 46.5, 55.8, 65.1]
+  layer_groups: [[0, 15], [15, 30], [30, 45]]
+  hit_threshold: 0.0151          # MeV, CaloChallenge readout threshold
+  max_events: null
+  test_max: null
+  split: [0.9, 0.1, 0.0]         # of dataset_2_1; the test split is dataset_2_2
+ladder:
+  lr_factor: [4, 3]
+  stages: [[2, 3], [2, 1]]
+noise:
+  rel_sigma: 0.1
+model:
+  patch: [5, 2, 3]
+encoder: {dim: 384, depth: 12, heads: 6}
+predictor: {dim: 192, depth: 6, heads: 6}
+# short-range blocks span part of the depth (learn the longitudinal development), long-range ones are full tubes
+masks:
+  - {n_blocks: 8, spatial_scale: [0.15, 0.15], aspect: [0.75, 1.5], depth_scale: [0.3, 0.6]}
+  - {n_blocks: 2, spatial_scale: [0.7, 0.7], aspect: [0.75, 1.5], depth_scale: [1.0, 1.0]}
+pretrain:
+  batch_size: 128
+  epochs: 100
+  lr: 5.0e-4
+  view_weights: [0.2, 0.2, 0.6]  # LR 4x3, 8x9, truth 16x9
+  main_pool: [1, 1, 1]           # the native grid is already small
+sr: {batch_size: 128, epochs: 50, lr: 3.0e-4}
+decoder: {batch_size: 128, epochs: 40, lr: 3.0e-4}
+e2e: {batch_size: 128, epochs: 40, lr: 3.0e-4}
+probe: {batch_size: 256, epochs: 20}

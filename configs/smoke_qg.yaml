@@ -1,0 +1,27 @@
+# Tiny synthetic jet run (CPU, ~1 min): exercises every stage end to end. Not a physics result.
+dataset: smoke_qg
+run_name: smoke
+device: cpu
+num_workers: 0
+data:
+  kind: jet
+  source: synthetic
+  planes: [tracks, ecal, hcal]
+  hr_shape: [32, 32]
+  center_index: 15.5
+  hit_threshold: 1.0e-3
+  max_events: 160
+ladder:
+  lr_factor: [4, 4]
+  stages: [[2, 2], [2, 2]]       # 8 -> 16 -> 32
+noise:
+  rel_sigma: [0.0, 0.1, 0.1]
+model: {patch: [1, 4, 4]}
+encoder: {dim: 48, depth: 2, heads: 2}
+predictor: {dim: 32, depth: 1, heads: 2}
+pretrain: {batch_size: 16, epochs: 2, main_pool: [1, 2, 2], cooldown_frac: 0.5}
+sr: {dim: 48, depth: 2, heads: 2, batch_size: 16, epochs: 2}
+decoder: {dim: 32, depth: 1, heads: 2, batch_size: 16, epochs: 2}
+e2e: {batch_size: 16, epochs: 1}
+probe: {heads: 2, batch_size: 16, epochs: 2}
+eval: {max_events: 32, batch_size: 16, n_examples: 2, ecf_top_k: 8}

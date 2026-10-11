@@ -1,0 +1,38 @@
+# CMS Open Data quark/gluon jet images (ML4Sci), 3 x 125 x 125 (tracks, ECAL, HCAL), padded to 128.
+# Measured LR = 32 x 32 (HR sum-pooled 4 x 4) + noise + topo-clustering. Ladder 32 -> 64 -> 128 (truth).
+# Model layout: an image with 3 channels (D = 1); 8 x 8 patches -> 16 x 16 tokens.
+# The data section matches superresolution-difflense/configs/qg.yaml, so its cache can be reused:
+#   --set paths.cache=../superresolution-difflense/data/cache/qg
+dataset: qg
+run_name: main
+data:
+  kind: jet
+  source: qg
+  cernbox_token: EYgmOkI9BjwxNqy   # public CERNBox share of the ML4Sci jet images
+  planes: [tracks, ecal, hcal]
+  hr_shape: [128, 128]
+  pad: [[1, 2], [1, 2]]          # 125 -> 128 so the 2x levels divide evenly
+  pixel_size: 0.0174             # ECAL crystal in (eta, phi)
+  center_index: 63               # jet axis in the padded grid
+  hit_threshold: 1.0e-3          # zero suppression per native cell (data units)
+  max_events: 60000
+  split: [0.8, 0.1, 0.1]
+ladder:
+  lr_factor: [4, 4]
+  stages: [[2, 2], [2, 2]]
+noise:
+  rel_sigma: [0.0, 0.1, 0.1]     # tracks carry no calorimeter noise
+model:
+  patch: [1, 8, 8]
+encoder: {dim: 384, depth: 12, heads: 6}      # ViT-S/8; scale to ViT-B/L if the GPU allows
+predictor: {dim: 192, depth: 6, heads: 6}
+pretrain:
+  batch_size: 128
+  epochs: 100
+  lr: 5.0e-4
+  view_weights: [0.2, 0.2, 0.6]  # LR measurement, 64 x 64, truth
+  main_pool: [1, 2, 2]           # 64 x 64 inputs (8 x 8 tokens) until the cooldown, then 128 x 128
+sr: {batch_size: 64, epochs: 50, lr: 3.0e-4}
+decoder: {batch_size: 64, epochs: 40, lr: 3.0e-4}
+e2e: {batch_size: 64, epochs: 40, lr: 3.0e-4}
+probe: {batch_size: 128, epochs: 20}
