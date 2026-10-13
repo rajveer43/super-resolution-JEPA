@@ -11,7 +11,7 @@ import torch
 
 from ..data.datasets import make_loader
 from ..pipeline import SRPipeline, checkpoint_paths, pixel_loss
-from .common import Trainer, autocast, batches, load_modules, setup, stage_dir
+from .common import Trainer, autocast, batches, load_modules, setup, stage_dir, train_augment
 
 
 def run(cfg, init):
@@ -28,15 +28,16 @@ def run(cfg, init):
             elif name == "encoder":
                 raise FileNotFoundError(f"{path} missing: run `pretrain` first")
     pipe = pipe.to(device)
-    loader = make_loader(cfg, "train", sec["batch_size"], True, sec["max_train"])
-    vloader = make_loader(cfg, "val", sec["batch_size"], False, sec["max_val"])
+    loader = make_loader(cfg, "train", sec["batch_size"], True, sec["max_train"], device=device)
+    aug = train_augment(cfg, L)
+    vloader = make_loader(cfg, "val", sec["batch_size"], False, sec["max_val"], device=device)
     out = stage_dir(cfg, f"e2e_{init}")
     enc_scale = sec["encoder_lr_scale"] if init == "jepa" else 1.0
     tr = Trainer(cfg, sec, out, pipe.modules_dict(),
                  [(pipe.encoder, enc_scale), (pipe.predictor, 1.0), (pipe.decoder, 1.0)], len(loader))
     while not tr.done:
         pipe.train()
-        for _, hr, lr, t in batches(loader, device):
+        for _, hr, lr, t in batches(loader, device, aug):
             with autocast(cfg, device):
                 y, _ = pipe(lr, t)
                 loss = pixel_loss(y, L.normalize(hr), L, sec["energy_weight"])

@@ -17,7 +17,7 @@ from ..masks import sample_masks
 from ..models.build import build_encoder, build_mask_predictor
 from ..models.vit import gather_tokens
 from ..pipeline import latents
-from .common import Trainer, autocast, batches, ema_update, in_cooldown, setup, stage_dir
+from .common import Trainer, autocast, batches, ema_update, in_cooldown, setup, stage_dir, train_augment
 
 
 def jepa_loss(enc, pred, target_enc, x, grid, mask_specs, g):
@@ -55,8 +55,9 @@ def run(cfg):
     print(f"encoder {sum(p.numel() for p in enc.parameters()) / 1e6:.1f}M params, "
           f"predictor {sum(p.numel() for p in pred.parameters()) / 1e6:.1f}M; token grid {L.grid()} "
           f"(main phase {L.grid(main_pool)}); levels {L.levels}")
-    loader = make_loader(cfg, "train", sec["batch_size"], True, sec["max_train"])
-    vloader = make_loader(cfg, "val", sec["batch_size"], False, sec["max_val"])
+    loader = make_loader(cfg, "train", sec["batch_size"], True, sec["max_train"], device=device)
+    aug = train_augment(cfg, L)
+    vloader = make_loader(cfg, "val", sec["batch_size"], False, sec["max_val"], device=device)
     out = stage_dir(cfg, "pretrain")
     tr = Trainer(cfg, sec, out, {"encoder": enc, "predictor": pred, "target_encoder": target},
                  [(enc, 1.0), (pred, 1.0)], len(loader))
@@ -64,7 +65,7 @@ def run(cfg):
     while not tr.done:
         enc.train()
         pred.train()
-        for _, hr, lr, _ in batches(loader, device):
+        for _, hr, lr, _ in batches(loader, device, aug):
             pool = (1, 1, 1) if in_cooldown(tr.step_n, tr.total, sec) else main_pool
             k = int(torch.multinomial(weights, 1, generator=g))
             x = L.normalize(L.level_image(hr, lr, k), pool)

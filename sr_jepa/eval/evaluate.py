@@ -69,7 +69,7 @@ def run(cfg):
                "latent_pred": [], "probe": [], "obs": []} for m in methods}
     truth = {"E": [], "planes": [], "obs": [], "target": [], "probe": []}
     examples = None
-    loader = make_loader(cfg, "test", ev["batch_size"], False, ev["max_events"])
+    loader = make_loader(cfg, "test", ev["batch_size"], False, ev["max_events"], device=device)
     for _, hr, lr, t in loader:
         hr, lr, t = hr.to(device), lr.to(device), t.to(device)
         x_hr = L.normalize(hr)

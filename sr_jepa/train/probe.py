@@ -10,7 +10,7 @@ import torch.nn.functional as F
 from ..data.datasets import make_loader
 from ..models.build import build_probe
 from ..pipeline import frozen_encoder, latents
-from .common import Trainer, autocast, batches, setup, stage_dir
+from .common import Trainer, autocast, batches, setup, stage_dir, train_augment
 
 
 def probe_target(L, t):
@@ -29,13 +29,14 @@ def run(cfg):
     sec = cfg["probe"]
     enc = frozen_encoder(cfg, L, device)
     probe = build_probe(cfg, 1).to(device)
-    loader = make_loader(cfg, "train", sec["batch_size"], True, sec["max_train"])
-    vloader = make_loader(cfg, "val", sec["batch_size"], False, sec["max_val"])
+    loader = make_loader(cfg, "train", sec["batch_size"], True, sec["max_train"], device=device)
+    aug = train_augment(cfg, L)
+    vloader = make_loader(cfg, "val", sec["batch_size"], False, sec["max_val"], device=device)
     out = stage_dir(cfg, "probe")
     tr = Trainer(cfg, sec, out, {"probe": probe}, [(probe, 1.0)], len(loader))
     while not tr.done:
         probe.train()
-        for _, hr, _, t in batches(loader, device):
+        for _, hr, _, t in batches(loader, device, aug):
             with torch.no_grad():
                 z = latents(enc, L.normalize(hr))
             with autocast(cfg, device):

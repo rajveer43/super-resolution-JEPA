@@ -40,7 +40,12 @@ def autocast(cfg, device):
 def setup(cfg):
     seed_all(int(cfg["seed"]))
     meta = load_meta(cfg)
-    return pick_device(cfg), meta, Layout(cfg, meta)
+    device = pick_device(cfg)
+    if device.type == "cuda":  # TF32 matmuls / convolutions for whatever autocast leaves in fp32
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cudnn.allow_tf32 = True
+        torch.backends.cudnn.benchmark = True
+    return device, meta, Layout(cfg, meta)
 
 
 def stage_dir(cfg, name):
@@ -78,8 +83,10 @@ def in_cooldown(step, total, sec):
 
 @torch.no_grad()
 def ema_update(target, online, m):
-    for pt, po in zip(target.parameters(), online.parameters()):
-        pt.mul_(m).add_(po.detach(), alpha=1 - m)
+    """Fused over all parameters: two kernels instead of two per tensor."""
+    tp = list(target.parameters())
+    torch._foreach_mul_(tp, m)
+    torch._foreach_add_(tp, [p.detach() for p in online.parameters()], alpha=1 - m)
 
 
 def save_modules(path, modules, **extra):
@@ -106,12 +113,16 @@ class Trainer:
         groups = [g for m, s in trainable for g in param_groups(m, s)]
         for g in groups:
             g["weight_decay"] = sec["weight_decay"] if g.pop("wd") else 0.0
-        self.opt = torch.optim.AdamW(groups, lr=sec["lr"], betas=(0.9, 0.999))
+        # peak lr, scaled by sqrt(batch / lr_ref_batch) when the batch differs from the one lr was set for
+        ref = sec.get("lr_ref_batch")
+        self.lr = sec["lr"] * (math.sqrt(sec["batch_size"] / ref) if ref else 1.0)
+        self.opt = torch.optim.AdamW(groups, lr=self.lr, betas=(0.9, 0.999))
         self.params = [p for g in groups for p in g["params"]]
         self.total = max(1, int(sec["epochs"]) * steps_per_epoch)
         self.step_n, self.epoch, self.best, self.bad = 0, 0, math.inf, 0
         self._acc = {}
-        self._t0 = time.time()
+        self._t0 = self._te = time.time()
+        self._epoch_steps = 0
         save_config(cfg, os.path.join(out, "config.json"))
         last = os.path.join(out, "last.pt")
         if os.path.exists(last):
@@ -127,7 +138,7 @@ class Trainer:
     def set_lr(self):
         f = wcd_factor(self.step_n, self.total, self.sec)
         for g in self.opt.param_groups:
-            g["lr"] = self.sec["lr"] * f * g["lr_scale"]
+            g["lr"] = self.lr * f * g["lr_scale"]
         return f
 
     def step(self, loss, **logs):
@@ -138,19 +149,22 @@ class Trainer:
             torch.nn.utils.clip_grad_norm_(self.params, self.sec["grad_clip"])
         self.opt.step()
         self.step_n += 1
+        self._epoch_steps += 1
+        # accumulate on the device: converting to Python floats here would sync with the GPU every step
         for k, v in {"loss": loss, **logs}.items():
             s, n = self._acc.get(k, (0.0, 0))
-            self._acc[k] = (s + float(v), n + 1)
+            self._acc[k] = (s + (v.detach().float() if torch.is_tensor(v) else float(v)), n + 1)
 
     def end_epoch(self, val):
         """val: dict with at least 'loss'. Writes history, checkpoints; prints a line."""
         self.epoch += 1
-        row = {"epoch": self.epoch, "step": self.step_n, "lr": self.sec["lr"] * wcd_factor(self.step_n, self.total,
-                                                                                            self.sec)}
-        row.update({f"train_{k}": s / max(n, 1) for k, (s, n) in self._acc.items()})
+        row = {"epoch": self.epoch, "step": self.step_n, "lr": self.lr * wcd_factor(self.step_n, self.total, self.sec)}
+        row.update({f"train_{k}": float(s) / max(n, 1) for k, (s, n) in self._acc.items()})
         row.update({f"val_{k}": float(v) for k, v in val.items()})
-        row["minutes"] = (time.time() - self._t0) / 60
-        self._acc = {}
+        now = time.time()
+        row["events_per_s"] = self._epoch_steps * self.sec["batch_size"] / max(now - self._te, 1e-9)
+        row["minutes"] = (now - self._t0) / 60
+        self._acc, self._te, self._epoch_steps = {}, now, 0
         improved = val["loss"] < self.best - 1e-6
         if improved:
             self.best, self.bad = float(val["loss"]), 0
@@ -171,6 +185,14 @@ class Trainer:
         return self.done
 
 
-def batches(loader, device):
+def batches(loader, device, augment=None):
+    """(index, hr, lr, target) on `device` (a no-op for splits preloaded there); augment(hr, lr) on training batches."""
     for i, hr, lr, tgt in loader:
-        yield i, hr.to(device, non_blocking=True), lr.to(device, non_blocking=True), tgt.to(device)
+        hr, lr = hr.to(device, non_blocking=True), lr.to(device, non_blocking=True)
+        if augment is not None:
+            hr, lr = augment(hr, lr)
+        yield i, hr, lr, tgt.to(device, non_blocking=True)
+
+
+def train_augment(cfg, L):
+    return L.augment if cfg["data"].get("augment", True) else None

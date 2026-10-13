@@ -36,6 +36,39 @@ def test_layout_roundtrip_and_levels(name):
         assert torch.allclose(L.level_image(E, lr, k).sum(), E.sum(), rtol=1e-4)
 
 
+@pytest.mark.parametrize("name", ["qg", "calo"])
+def test_augment_commutes_with_the_measurement(name):
+    """Augmenting (HR, LR) must give the same pair as measuring the augmented HR, or training pairs break."""
+    torch.manual_seed(0)
+    _, L = _layout(name)
+    f = L._factor(L.levels[0])
+    hr = torch.rand(8, L.P, *L.native)
+    for _ in range(5):
+        a_hr, a_lr = L.augment(hr, sum_pool(hr, f))
+        assert torch.allclose(sum_pool(a_hr, f), a_lr, rtol=1e-5, atol=1e-5)
+        assert torch.allclose(a_hr.sum((1, 2, 3)), hr.sum((1, 2, 3)), rtol=1e-5)
+
+
+def test_preloaded_loader_visits_every_event_once(tmp_path):
+    from numpy.lib.format import open_memmap
+    from sr_jepa.data.datasets import make_loader
+    import numpy as np
+    n = 37
+    for what, shape in (("hr", (n, 3, 8, 8)), ("lr", (n, 3, 2, 2))):
+        m = open_memmap(tmp_path / f"train_{what}.npy", "w+", np.float32, shape)
+        m[:] = np.arange(n, dtype=np.float32).reshape(n, 1, 1, 1)
+        m.flush()
+    np.save(tmp_path / "train_target.npy", np.arange(n, dtype=np.float64))
+    cfg = load_config("configs/smoke_qg.yaml", [f"paths.cache={tmp_path}", "data.preload=cpu",
+                                                "data.preload_dtype=float16"])
+    for shuffle, expect in ((True, 36), (False, 37)):  # shuffled batches drop the last partial batch
+        seen = []
+        for i, hr, lr, t in make_loader(cfg, "train", 4, shuffle):
+            assert hr.dtype == torch.float32 and torch.equal(hr[:, 0, 0, 0], t) and torch.equal(i.float(), t)
+            seen += t.tolist()
+        assert len(seen) == expect and len(set(seen)) == expect
+
+
 def test_project_to_lr_closes_energy():
     _, L = _layout("smoke_qg")
     E = torch.rand(2, L.P, *L.native)

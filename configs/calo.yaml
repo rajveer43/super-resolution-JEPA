@@ -40,7 +40,7 @@ pretrain:
   lr: 5.0e-4
   view_weights: [0.2, 0.2, 0.6]  # LR 4x3, 8x9, truth 16x9
   main_pool: [1, 1, 1]           # the native grid is already small
-sr: {batch_size: 128, epochs: 50, lr: 3.0e-4}
-decoder: {batch_size: 128, epochs: 40, lr: 3.0e-4}
-e2e: {batch_size: 128, epochs: 40, lr: 3.0e-4}
+sr: {batch_size: 128, epochs: 50, lr: 3.0e-4, lr_ref_batch: 128}
+decoder: {batch_size: 128, epochs: 40, lr: 3.0e-4, lr_ref_batch: 128}
+e2e: {batch_size: 128, epochs: 40, lr: 3.0e-4, lr_ref_batch: 128}
 probe: {batch_size: 256, epochs: 20}

@@ -12,7 +12,7 @@ import torch
 from ..data.datasets import make_loader
 from ..models.build import build_decoder, build_sr_predictor
 from ..pipeline import frozen_encoder, latents, pixel_loss
-from .common import Trainer, autocast, batches, load_modules, setup, stage_dir
+from .common import Trainer, autocast, batches, load_modules, setup, stage_dir, train_augment
 
 
 def run(cfg):
@@ -30,33 +30,29 @@ def run(cfg):
         print(f"[decoder] {sr_ck} missing: training on E(HR) latents only")
         p_pred = 0.0
     D = build_decoder(cfg, L).to(device)
-    loader = make_loader(cfg, "train", sec["batch_size"], True, sec["max_train"])
-    vloader = make_loader(cfg, "val", sec["batch_size"], False, sec["max_val"])
+    loader = make_loader(cfg, "train", sec["batch_size"], True, sec["max_train"], device=device)
+    aug = train_augment(cfg, L)
+    vloader = make_loader(cfg, "val", sec["batch_size"], False, sec["max_val"], device=device)
     out = stage_dir(cfg, "decoder")
     tr = Trainer(cfg, sec, out, {"decoder": D}, [(D, 1.0)], len(loader))
     grid, K = L.grid(), len(L.levels) - 1
     g = torch.Generator(device="cpu").manual_seed(int(cfg["seed"]) + tr.step_n)
     while not tr.done:
         D.train()
-        for _, hr, lr, t in batches(loader, device):
+        for _, hr, lr, t in batches(loader, device, aug):
             with torch.no_grad():
                 x_hr = L.normalize(hr)
                 x_lr = L.normalize(L.level_image(hr, lr, 0))
                 z = latents(enc, x_hr)
-                if p_pred > 0:
-                    use = (torch.rand(len(z), generator=g) < p_pred).to(device)
-                    if use.any():
-                        zp = P.rollout(latents(enc, x_lr[use]), _sel(L.cond(t), use), grid, K)[-1]
-                        z[use] = zp.float()
+                if p_pred > 0:  # whole-batch rollout + select: no data-dependent shapes, no GPU sync
+                    use = (torch.rand(len(z), generator=g) < p_pred).to(device).view(-1, 1, 1)
+                    zp = P.rollout(latents(enc, x_lr), L.cond(t), grid, K)[-1].float()
+                    z = torch.where(use, zp, z)
             with autocast(cfg, device):
                 loss = pixel_loss(D(z, grid, x_lr), x_hr, L, sec["energy_weight"])
             tr.step(loss)
         tr.end_epoch(validate(cfg, L, enc, P, D, vloader, device))
     return out
-
-
-def _sel(c, m):
-    return None if c is None else c[m]
 
 
 @torch.no_grad()

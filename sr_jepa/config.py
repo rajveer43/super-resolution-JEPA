@@ -23,6 +23,8 @@ _OPT = {
     "max_train": None,
     "max_val": 2000,
     "patience": None,        # early stopping on the validation loss (epochs); None = off
+    # lr is the peak at this batch size; another batch size scales it by sqrt(batch_size / lr_ref_batch)
+    "lr_ref_batch": None,
 }
 
 BASE = {
@@ -44,6 +46,9 @@ BASE = {
         "max_events": None,
         "split": [0.8, 0.1, 0.1],
         "import_cache": None,
+        "augment": True,         # symmetry augmentation of training batches (Layout.augment)
+        "preload": "auto",       # auto | gpu | cpu | none: where a split lives during training (see make_loader)
+        "preload_dtype": "float32",  # float16 halves the memory (jets); falls back to float32 if values overflow
     },
     # The measured LR is HR sum-pooled by lr_factor, plus noise and topo-clustering. The ladder
     # LR -> ... -> native grid is the "time" axis of the SR world model: every level has truth.
@@ -75,6 +80,8 @@ BASE = {
     "pretrain": {
         **_OPT,
         "epochs": 100,
+        "lr_ref_batch": 128,
+        "cooldown_frac": 0.2,    # the cooldown is also the full-resolution phase: give it a fifth of training
         "ema": 0.999,            # fixed teacher momentum (V-JEPA 2: no ramp)
         # sampling weight of each ladder level as pretraining input, LR first (cf. the VM22M data mix):
         # the frozen encoder must embed the measurement as well as the truth
@@ -88,6 +95,8 @@ BASE = {
     "sr": {
         **_OPT,
         "dim": 384, "depth": 8, "heads": 6, "mlp_ratio": 4.0,
+        "lr_ref_batch": 64,
+        "patience": 5,           # the predictor memorises after ~15 epochs on 48k jets
         "residual": True,        # predict z_{k+1} = z_k + delta
         "rollout_weight": 1.0,
     },
@@ -95,6 +104,8 @@ BASE = {
     "decoder": {
         **_OPT,
         "dim": 256, "depth": 4, "heads": 8, "mlp_ratio": 4.0,
+        "lr_ref_batch": 64,
+        "patience": 5,
         "lr_skip": True,         # also sees the patch-embedded LR measurement
         "pred_latent_prob": 0.5, # share of events decoded from the SR predictor's latent instead of E(HR)
         "energy_weight": 0.1,    # relative event-energy error term
@@ -103,11 +114,13 @@ BASE = {
     "e2e": {
         **_OPT,
         "inits": ["jepa", "scratch"],
+        "lr_ref_batch": 64,
+        "patience": 5,
         "encoder_lr_scale": 0.1, # for the jepa init: fine-tune the pretrained encoder slowly
         "energy_weight": 0.1,
     },
     # frozen-representation check (V-JEPA attentive probe): quark/gluon (jet) or E_inc (shower) from latents
-    "probe": {**_OPT, "epochs": 20, "lr": 1e-3, "weight_decay": 0.01, "heads": 4, "depth": 1},
+    "probe": {**_OPT, "epochs": 20, "lr": 1e-3, "weight_decay": 0.01, "heads": 4, "depth": 1, "patience": 5},
     "eval": {
         "max_events": 5000,
         "batch_size": 128,

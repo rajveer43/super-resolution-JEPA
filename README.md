@@ -80,6 +80,13 @@ python -m sr_jepa all -c configs/smoke_calo.yaml
 
 Outputs go to `runs/<dataset>/<run_name>/`. Each stage writes its own directory (`pretrain/`, `sr/`, `decoder/`, `probe/`, `e2e_jepa/`, `e2e_scratch/`) holding `best.pt`, `last.pt`, `history.csv` and `config.json`. The evaluation goes to `evaluation/`: `metrics.json`, `summary.md`, `examples.png` and `observables.png`.
 
+**Training practice:**
+- **Data:** each split is loaded once into GPU memory, or RAM if it doesn't fit (`data.preload`), and batched by indexing. Jets can be stored in fp16 (`data.preload_dtype`) so all 139k fit on a 40 GB A100.
+- **Augmentation:** jets get η and φ reflections; showers get angular reflections and rotations about the beam axis by whole LR cells. Each transform is applied identically to truth and measurement, so every pair stays exact.
+- **Early stopping:** after 5 epochs without improvement for the SR, decoder, probe and e2e stages. Pretraining always runs its full schedule.
+- **Batch size and learning rate:** the learning rate scales with sqrt(batch / `lr_ref_batch`).
+- **Overheads:** masks are sampled in one vectorized step, logs stay on the GPU until the end of each epoch, and the EMA update is fused. `history.csv` records `events_per_s`.
+
 **What to watch in `history.csv`:**
 - `pretrain`: `val_feat_std` must stay well above 0; if it falls towards 0, the representation has collapsed.
 - `sr`: `val_loss` (the rollout from the LR) must fall clearly below `val_identity` (the latent error of doing nothing).

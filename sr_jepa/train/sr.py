@@ -13,7 +13,7 @@ import torch
 from ..data.datasets import make_loader
 from ..models.build import build_sr_predictor
 from ..pipeline import encode_levels, frozen_encoder
-from .common import Trainer, autocast, batches, setup, stage_dir
+from .common import Trainer, autocast, batches, setup, stage_dir, train_augment
 
 
 def sr_losses(P, zs, cond, grid, grad_steps=1):
@@ -30,14 +30,15 @@ def run(cfg):
     enc = frozen_encoder(cfg, L, device)
     P = build_sr_predictor(cfg, L).to(device)
     print(f"SR predictor {sum(p.numel() for p in P.parameters()) / 1e6:.1f}M params, levels {L.levels}")
-    loader = make_loader(cfg, "train", sec["batch_size"], True, sec["max_train"])
-    vloader = make_loader(cfg, "val", sec["batch_size"], False, sec["max_val"])
+    loader = make_loader(cfg, "train", sec["batch_size"], True, sec["max_train"], device=device)
+    aug = train_augment(cfg, L)
+    vloader = make_loader(cfg, "val", sec["batch_size"], False, sec["max_val"], device=device)
     out = stage_dir(cfg, "sr")
     tr = Trainer(cfg, sec, out, {"predictor": P}, [(P, 1.0)], len(loader))
     grid = L.grid()
     while not tr.done:
         P.train()
-        for _, hr, lr, t in batches(loader, device):
+        for _, hr, lr, t in batches(loader, device, aug):
             with torch.no_grad():
                 zs = encode_levels(enc, L, hr, lr)
             with autocast(cfg, device):
