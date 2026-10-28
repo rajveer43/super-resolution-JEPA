@@ -32,9 +32,16 @@ def seed_all(seed):
 
 def autocast(cfg, device):
     # bf16 only where the GPU has it (A100 / L4 / H100); a T4 runs in fp32
-    if device.type == "cuda" and cfg["amp"] and torch.cuda.is_bf16_supported(including_emulation=False):
+    if device.type == "cuda" and cfg["amp"] and native_bf16():
         return torch.autocast("cuda", dtype=torch.bfloat16)
     return contextlib.nullcontext()
+
+
+def native_bf16():
+    try:
+        return torch.cuda.is_bf16_supported(including_emulation=False)
+    except TypeError:  # torch < 2.4 has no including_emulation; bf16 is native from compute capability 8.0
+        return torch.cuda.get_device_capability()[0] >= 8
 
 
 def setup(cfg):
