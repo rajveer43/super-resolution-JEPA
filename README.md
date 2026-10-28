@@ -78,7 +78,25 @@ python -m sr_jepa all -c configs/smoke_qg.yaml
 python -m sr_jepa all -c configs/smoke_calo.yaml
 ```
 
-Outputs go to `runs/<dataset>/<run_name>/`. Each stage writes its own directory (`pretrain/`, `sr/`, `decoder/`, `probe/`, `e2e_jepa/`, `e2e_scratch/`) holding `best.pt`, `last.pt`, `history.csv` and `config.json`. The evaluation goes to `evaluation/`: `metrics.json`, `summary.md`, `examples.png` and `observables.png`.
+Outputs go to `runs/<dataset>/<run_name>/`. Each stage writes its own directory (`pretrain/`, `sr/`, `decoder/`, `probe/`, `e2e_jepa/`, `e2e_scratch/`) holding `best.pt`, `last.pt`, `history.csv` and `config.json`. The evaluation goes to `evaluation/`:
+- `metrics.json` and `summary.md`;
+- `per_event.npz`, the per-event numbers behind the figures; redraw them with `python -m sr_jepa.eval.plots runs/<dataset>/<run_name>`;
+- the figures:
+
+| Figure | Shows |
+|---|---|
+| `examples.png` | A few test events, every method next to the truth. Same views as the Superresolution repo: jets with the channels summed; showers as radius × layer. |
+| `channels_event<i>.png` | One test event: rows truth / LR / each method; columns tracks / ECAL / HCAL (jets) or early / middle / late layers (showers). |
+| `observables.png` | Overview: the distribution of every physics observable, per method, against the truth. |
+| `hist/hist_<observable>.png` | One observable: normalised distributions with the ratio to the truth, and the % of events outside the plotted range. |
+| `scatter/scatter_<observable>.png` | One observable per event, method against truth, with bias, resolution and Pearson r per panel. |
+| `scatter_observables.png` | Overview of the key observables (jets: mass, pT, girth; showers: depth and radial centroids, early-energy fraction). |
+| `profile_radial.png`, `profile_longitudinal.png` | Mean energy fraction against ΔR from the jet axis or shower radius, and against layer (showers), with the ratio to the truth. |
+| `w1_heatmap.png` | W1/σ_truth for every observable × method: a one-glance summary. |
+| `energy_residuals.png` | (E − E_true)/E_true in total and per plane or layer group, with bias and resolution. |
+| `training_curves.png` | Train and validation loss of every stage, with the "no SR" and decoder-ceiling references, the full-resolution phase of pretraining, the collapse check, and the best epoch. |
+| `probe_roc.png` (jets) | Quark/gluon ROC of the frozen-feature probe on each method's latent, with AUC. |
+| `energy_vs_einc.png` (showers) | Bias and resolution of the event energy against the incident energy. |
 
 **Training practice:**
 - **Data:** each split is loaded once into GPU memory, or RAM if it doesn't fit (`data.preload`), and batched by indexing. Jets can be stored in fp16 (`data.preload_dtype`) so all 139k fit on a 40 GB A100.

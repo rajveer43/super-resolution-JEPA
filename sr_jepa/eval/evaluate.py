@@ -10,7 +10,8 @@ Metrics (streamed over batches; only per-event scalars and a few example images 
   latent      L1 to E(HR) in the frozen JEPA latent space: predicted latent (jepa) and re-encoded output
   probe       the frozen-feature probe applied to each latent: quark/gluon AUC (jet), E_inc bias /
               resolution (shower)
-Outputs: {out}/evaluation/metrics.json, summary.md, examples.png, observables.png
+Outputs in {out}/evaluation/: metrics.json, summary.md, per_event.npz (+ meta) and the figures of plots.py
+(examples, observables, scatter_observables, energy_residuals, training_curves, probe_roc / energy_vs_einc).
 """
 import json
 import os
@@ -25,6 +26,7 @@ from ..geometry import Geometry
 from ..models.build import build_probe
 from ..pipeline import VARIANTS, available, frozen_encoder, latents, load_pipeline, super_resolve
 from ..train.common import load_modules, setup, stage_dir
+from . import plots
 from .observables import dense_to_cells, observables
 
 
@@ -65,9 +67,10 @@ def run(cfg):
     print(f"evaluating {methods} on up to {ev['max_events']} test events")
 
     groups = _groups(L, geom)
+    prof_axes = plots.profile_axes(L.kind, geom)
     rec = {m: {"E": [], "planes": [], "mae": [], "mse": [], "tp": 0, "fp": 0, "fn": 0, "latent": [],
-               "latent_pred": [], "probe": [], "obs": []} for m in methods}
-    truth = {"E": [], "planes": [], "obs": [], "target": [], "probe": []}
+               "latent_pred": [], "probe": [], "obs": [], "profiles": []} for m in methods}
+    truth = {"E": [], "planes": [], "obs": [], "target": [], "probe": [], "profiles": []}
     examples = None
     loader = make_loader(cfg, "test", ev["batch_size"], False, ev["max_events"], device=device)
     for _, hr, lr, t in loader:
@@ -83,6 +86,7 @@ def run(cfg):
         truth["target"].append(t.cpu().numpy())
         truth["obs"].append(observables(dense_to_cells(hr_np), len(hr_np), geom, thr, t.cpu().numpy(),
                                         ev["ecf_top_k"]))
+        truth["profiles"].append(plots.event_profiles(L.kind, geom, prof_axes, hr_np))
         if probe is not None:
             truth["probe"].append(probe(z_hr)[:, 0].float().cpu().numpy())
         hit_true = hr > L.hit_threshold
@@ -108,6 +112,7 @@ def run(cfg):
                 r["probe"].append(probe(z_for_probe)[:, 0].float().cpu().numpy())
             r["obs"].append(observables(dense_to_cells(E_np), len(E_np), geom, thr, t.cpu().numpy(),
                                         ev["ecf_top_k"]))
+            r["profiles"].append(plots.event_profiles(L.kind, geom, prof_axes, E_np))
         if examples is None:
             k = min(ev["n_examples"], len(hr_np))
             examples = {"hr": hr_np[:k], **{m: outs[m][0][:k].cpu().numpy() for m in methods}}
@@ -154,7 +159,14 @@ def run(cfg):
         json.dump(metrics, f, indent=2)
     with open(os.path.join(out, "summary.md"), "w") as f:
         f.write(summary_markdown(metrics, methods))
-    _figures(out, L, geom, examples, {m: cat_obs(rec[m]["obs"]) for m in methods}, tobs, ev["hist_bins"])
+    data = {"kind": L.kind, "planes": geom.planes, "groups": groups, "methods": methods, "examples": examples,
+            "profile_axes": prof_axes,
+            "truth": {"E": tE, "planes": tP, "target": target, "obs": tobs, "probe": cat(truth["probe"]),
+                      "profiles": cat_obs(truth["profiles"])},
+            "m": {m: {"E": cat(rec[m]["E"]), "planes": cat(rec[m]["planes"]), "obs": cat_obs(rec[m]["obs"]),
+                      "probe": cat(rec[m]["probe"]), "profiles": cat_obs(rec[m]["profiles"])} for m in methods}}
+    plots.save_per_event(out, data)
+    plots.make_all(out, plots.load_per_event(out), cfg["paths"]["out"], ev["hist_bins"])
     print(summary_markdown(metrics, methods))
     return metrics
 
@@ -218,48 +230,3 @@ def summary_markdown(metrics, methods):
 
 def _fmt(v):
     return f"{v:.4g}" if isinstance(v, float) else repr(v) if isinstance(v, (list, dict)) else str(v)
-
-
-def _figures(out, L, geom, examples, obs, tobs, bins):
-    import matplotlib
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
-    methods = [m for m in examples if m != "hr"]
-    cols = methods + ["hr"]
-    k = len(examples["hr"])
-    plane = 1 if L.kind == "jet" and L.P > 1 else None   # ECAL for jets; layer sum for showers
-    fig, axes = plt.subplots(k, len(cols), figsize=(2.6 * len(cols), 2.6 * k), squeeze=False)
-    for i in range(k):
-        ref = examples["hr"][i][plane] if plane is not None else examples["hr"][i].sum(0)
-        vmax = max(float(ref.max()), 1e-6)
-        for j, c in enumerate(cols):
-            img = examples[c][i][plane] if plane is not None else examples[c][i].sum(0)
-            axes[i, j].imshow(np.log10(np.maximum(img, vmax * 1e-4)), vmin=np.log10(vmax * 1e-4),
-                              vmax=np.log10(vmax), cmap="inferno", aspect="auto")
-            axes[i, j].set_xticks([])
-            axes[i, j].set_yticks([])
-            if i == 0:
-                axes[i, j].set_title(c)
-    fig.suptitle(f"{'ECAL' if plane is not None else 'energy summed over layers'} (log10)")
-    fig.tight_layout()
-    fig.savefig(os.path.join(out, "examples.png"), dpi=120)
-    plt.close(fig)
-
-    keys = list(tobs)
-    nc = 4
-    nr = (len(keys) + nc - 1) // nc
-    fig, axes = plt.subplots(nr, nc, figsize=(3.4 * nc, 2.7 * nr), squeeze=False)
-    for a, key in zip(axes.flat, keys):
-        b = tobs[key][np.isfinite(tobs[key])]
-        lo, hi = np.percentile(b, [0.5, 99.5]) if len(b) else (0, 1)
-        edges = np.linspace(lo, hi if hi > lo else lo + 1, bins + 1)
-        a.hist(b, edges, histtype="stepfilled", alpha=0.3, color="k", label="hr")
-        for m in methods:
-            a.hist(obs[m][key][np.isfinite(obs[m][key])], edges, histtype="step", label=m)
-        a.set_title(key, fontsize=9)
-    for a in axes.flat[len(keys):]:
-        a.axis("off")
-    axes.flat[0].legend(fontsize=7)
-    fig.tight_layout()
-    fig.savefig(os.path.join(out, "observables.png"), dpi=120)
-    plt.close(fig)
