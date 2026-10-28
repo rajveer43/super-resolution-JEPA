@@ -96,27 +96,64 @@ def ema_update(target, online, m):
     torch._foreach_add_(tp, [p.detach() for p in online.parameters()], alpha=1 - m)
 
 
-def save_modules(path, modules, **extra):
+def upstream_dir(cfg):
+    """Experiment folder that upstream checkpoints are read from (tuning trials train on the frozen stages of
+    the experiment while writing to their own folder)."""
+    return cfg["paths"].get("upstream") or cfg["paths"]["out"]
+
+
+# config keys that change a network's shapes, per section: saved in every checkpoint and checked on loading
+ARCH_KEYS = {"model": ("patch",), "encoder": ("dim", "depth", "heads", "mlp_ratio"),
+             "predictor": ("dim", "depth", "heads", "mlp_ratio"), "sr": ("dim", "depth", "heads", "mlp_ratio",
+                                                                         "residual"),
+             "decoder": ("dim", "depth", "heads", "mlp_ratio", "lr_skip"), "probe": ("heads", "depth")}
+
+
+def arch_signature(cfg):
+    return {sec: {k: cfg[sec].get(k) for k in keys} for sec, keys in ARCH_KEYS.items()}
+
+
+def save_modules(path, modules, arch=None, **extra):
     tmp = path + ".tmp"
-    torch.save({"modules": {k: m.state_dict() for k, m in modules.items()}, **extra}, tmp)
+    torch.save({"modules": {k: m.state_dict() for k, m in modules.items()}, "arch": arch, **extra}, tmp)
     os.replace(tmp, path)
 
 
-def load_modules(path, modules, strict=True):
+def load_modules(path, modules, strict=True, cfg=None, sections=()):
+    """Load state dicts. With cfg + sections, first check that the checkpoint was built with the same
+    architecture as the current config (e.g. tuned dims), and fail with a readable message otherwise."""
     if not os.path.exists(path):
         raise FileNotFoundError(f"{path} missing: run the stage that produces it first")
     ck = torch.load(path, map_location="cpu", weights_only=False)
+    saved = ck.get("arch")
+    if cfg is not None and saved:
+        now = arch_signature(cfg)
+        diff = [f"{s}.{k}: checkpoint {saved[s][k]!r}, config {now[s][k]!r}" for s in sections
+                for k in ARCH_KEYS[s] if s in saved and list(_seq(saved[s].get(k))) != list(_seq(now[s][k]))]
+        if diff:
+            raise ValueError(f"{path} was built with a different architecture than the current config "
+                             f"(tuned values or --set changed since it was trained?):\n  " + "\n  ".join(diff))
     for k, m in modules.items():
-        m.load_state_dict(ck["modules"][k], strict=strict)
+        try:
+            m.load_state_dict(ck["modules"][k], strict=strict)
+        except RuntimeError as e:
+            raise RuntimeError(f"cannot load '{k}' from {path}: the config does not match the checkpoint's "
+                               f"architecture (tuned values or --set changed since it was trained?)\n{e}") from e
     return ck
+
+
+def _seq(v):
+    return v if isinstance(v, (list, tuple)) else [v]
 
 
 class Trainer:
     """Optimiser + schedule + per-epoch bookkeeping. Resumes from {out}/last.pt; keeps {out}/best.pt (lowest
     validation loss) and {out}/history.csv. `modules` are everything saved; `trainable` [(module, lr_scale)]."""
 
-    def __init__(self, cfg, sec, out, modules, trainable, steps_per_epoch):
-        self.cfg, self.sec, self.out, self.modules = cfg, sec, out, modules
+    def __init__(self, cfg, sec, out, modules, trainable, steps_per_epoch, on_epoch=None):
+        """on_epoch(epoch, val): called after every epoch (tuning: report to Optuna, prune)."""
+        self.cfg, self.sec, self.out, self.modules, self.on_epoch = cfg, sec, out, modules, on_epoch
+        self.arch = arch_signature(cfg)
         groups = [g for m, s in trainable for g in param_groups(m, s)]
         for g in groups:
             g["weight_decay"] = sec["weight_decay"] if g.pop("wd") else 0.0
@@ -175,11 +212,11 @@ class Trainer:
         improved = val["loss"] < self.best - 1e-6
         if improved:
             self.best, self.bad = float(val["loss"]), 0
-            save_modules(os.path.join(self.out, "best.pt"), self.modules, epoch=self.epoch, val=val)
+            save_modules(os.path.join(self.out, "best.pt"), self.modules, self.arch, epoch=self.epoch, val=val)
         else:
             self.bad += 1
-        save_modules(os.path.join(self.out, "last.pt"), self.modules, opt=self.opt.state_dict(), step=self.step_n,
-                     epoch=self.epoch, best=self.best, bad=self.bad)
+        save_modules(os.path.join(self.out, "last.pt"), self.modules, self.arch, opt=self.opt.state_dict(),
+                     step=self.step_n, epoch=self.epoch, best=self.best, bad=self.bad)
         path = os.path.join(self.out, "history.csv")
         new = not os.path.exists(path)
         with open(path, "a", newline="") as f:
@@ -189,6 +226,8 @@ class Trainer:
             w.writerow(row)
         print(f"[{os.path.basename(self.out)}] epoch {self.epoch}/{self.sec['epochs']} "
               + " ".join(f"{k}={v:.4g}" for k, v in row.items() if k not in ("epoch",)) + (" *" if improved else ""))
+        if self.on_epoch is not None:
+            self.on_epoch(self.epoch, val)
         return self.done
 
 

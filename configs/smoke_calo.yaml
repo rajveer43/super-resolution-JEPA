@@ -30,3 +30,37 @@ decoder: {dim: 32, depth: 1, heads: 2, batch_size: 16, epochs: 2}
 e2e: {batch_size: 16, epochs: 1}
 probe: {heads: 2, batch_size: 16, epochs: 2}
 eval: {max_events: 32, batch_size: 16, n_examples: 2, ecf_top_k: 8}
+# tiny studies so `--set tune.enabled=true` exercises every tuning stage in a few minutes on CPU
+tune:
+  pruner: {startup_trials: 1, warmup_epochs: 0}
+  studies:
+    pretrain:
+      n_trials: 2
+      epochs: 1
+      proxy_sr_epochs: 1
+      max_train: null
+      space:
+        - {key: pretrain.lr, type: float, low: 1.0e-4, high: 1.0e-3, log: true}
+        - {key: pretrain.ema, type: categorical, choices: [0.99, 0.999]}
+        - {key: predictor.dim, type: categorical, choices: [32, 64]}
+        - {key: masks.short_scale, type: float, low: 0.1, high: 0.2}
+        - {key: pretrain.lr_view_share, type: float, low: 0.1, high: 0.4}
+    sr:
+      n_trials: 3
+      epochs: 2
+      max_train: null
+      space:
+        - {key: sr.lr, type: float, low: 1.0e-4, high: 1.0e-3, log: true}
+        - {key: sr.dim, type: categorical, choices: [32, 64]}
+        - {key: sr.dropout, type: float, low: 0.0, high: 0.3}
+    decoder:
+      n_trials: 2
+      epochs: 1
+      max_train: null
+      space:
+        - {key: decoder.lr, type: float, low: 1.0e-4, high: 1.0e-3, log: true}
+        - {key: decoder.dim, type: categorical, choices: [32, 64]}
+        - {key: decoder.lr_skip, type: categorical, choices: [true, false]}
+    probe: {n_trials: 2, epochs: 1, max_train: null}
+    e2e_jepa: {n_trials: 2, epochs: 1, max_train: null}
+    e2e_scratch: {n_trials: 2, epochs: 1, max_train: null}

@@ -12,6 +12,7 @@ import copy
 
 import torch
 
+from ..config import tuned_report
 from ..data.datasets import make_loader
 from ..masks import sample_masks
 from ..models.build import build_encoder, build_mask_predictor
@@ -37,7 +38,8 @@ def feature_std(enc, x):
     return enc(x).float().mean(1).std(0).mean()
 
 
-def run(cfg):
+def run(cfg, on_epoch=None):
+    tuned_report(cfg, "pretrain")
     device, meta, L = setup(cfg)
     sec = cfg["pretrain"]
     main_pool = tuple(int(p) for p in sec["main_pool"])
@@ -60,7 +62,7 @@ def run(cfg):
     vloader = make_loader(cfg, "val", sec["batch_size"], False, sec["max_val"], device=device)
     out = stage_dir(cfg, "pretrain")
     tr = Trainer(cfg, sec, out, {"encoder": enc, "predictor": pred, "target_encoder": target},
-                 [(enc, 1.0), (pred, 1.0)], len(loader))
+                 [(enc, 1.0), (pred, 1.0)], len(loader), on_epoch)
     g = torch.Generator().manual_seed(int(cfg["seed"]) + tr.step_n)
     while not tr.done:
         enc.train()

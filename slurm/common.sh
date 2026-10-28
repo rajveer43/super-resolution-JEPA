@@ -15,6 +15,33 @@ load_settings() {
     [[ -n "${ROOT:-}" && "$ROOT" != "/sr_jepa" ]] || die "ROOT is empty: is \$SCRATCH set? (see settings.sh)"
     [[ "$DATASET" == qg || "$DATASET" == calo ]] || die "DATASET must be qg or calo, not '$DATASET'"
     read -r -a E2E_LIST <<< "${E2E_INITS:-}"
+    read -r -a ENCODER_LIST <<< "${ENCODERS:-S}"
+    local e
+    for e in "${ENCODER_LIST[@]}"; do [[ "$e" =~ ^[SBL]$ ]] || die "ENCODERS may only list S, B and L, not '$e'"; done
+}
+
+# Optuna studies of TUNE_STAGES (e2e -> one study per init in E2E_INITS), e.g. "pretrain sr e2e_jepa".
+tuned_studies() {
+    local s i out=()
+    for s in ${TUNE_STAGES:-}; do
+        if [[ "$s" == e2e ]]; then
+            for i in "${E2E_LIST[@]}"; do out+=("e2e_$i"); done
+        else
+            out+=("$s")
+        fi
+    done
+    echo "${out[*]}"
+}
+
+# Encoder presets of the size comparison: "dim depth heads batch-cap" (batch caps are memory estimates for a
+# 40 GB A100 at 128 x 128 jets; the learning rates follow the batch through lr_ref_batch).
+encoder_preset() {
+    case "$1" in
+        S) echo "384 12 6 1024" ;;
+        B) echo "768 12 12 128" ;;
+        L) echo "1024 24 16 64" ;;
+        *) die "unknown encoder size '$1'" ;;
+    esac
 }
 
 die() { echo "ERROR: $*" >&2; exit 1; }
@@ -52,6 +79,7 @@ newest_env_file() {
 latest_experiment_date() {
     local f
     f="$(newest_env_file "$ROOT/logs" "*_${RUN_TAG}")"
+    [[ -n "$f" ]] || f="$(newest_env_file "$ROOT/logs" "*_${RUN_TAG}-vit?")"
     [[ -n "$f" ]] && basename "$(dirname "$f")" | cut -c1-10
     return 0
 }
@@ -98,6 +126,8 @@ job_header() {
     echo "started    : $(date '+%Y-%m-%d %H:%M:%S %Z')"
     echo "code       : $(git -C "$REPO" rev-parse --abbrev-ref HEAD 2> /dev/null) $(git -C "$REPO" rev-parse --short HEAD 2> /dev/null)"
     echo "settings   : dataset=$DATASET max_events=${MAX_EVENTS:-all} batch=$BATCH patience=$PATIENCE qos=$QOS extra='$EXTRA_SET'"
+    echo "encoder    : ${ENCODER_SIZE:-S} | tuning: $( ((${TUNE_THIS:-0})) && echo "studies '$(tuned_studies)' in this experiment" \
+        || { [[ -n "${TUNED_FROM_EXP:-}" ]] && echo "values from $TUNED_FROM_EXP" || echo off; })"
     python -c 'import sys, torch; print("python", sys.version.split()[0], "| torch", torch.__version__, "| cuda", torch.cuda.is_available())'
     # CPU nodes (prepare) may have nvidia-smi on PATH but no driver: it then fails, and under
     # set -e that failure would end the job here, before python starts
@@ -112,9 +142,25 @@ pipeline_sets() {
     local workers=$((PHYS_CORES > 2 ? PHYS_CORES / 2 : 1)) s
     SETS=("run_name=$EXPERIMENT" "paths.raw=$(raw_dir)" "paths.cache=$(cache_dir)" "paths.out=$(experiment_dir)"
           "num_workers=$workers" "data.max_events=${MAX_EVENTS:-null}")
-    if [[ -n "${BATCH:-}" ]]; then
-        for s in pretrain sr decoder e2e; do SETS+=("$s.batch_size=$BATCH"); done
+    local dim depth heads cap batch="${BATCH:-}"
+    read -r dim depth heads cap <<< "$(encoder_preset "${ENCODER_SIZE:-S}")"
+    if [[ "${ENCODER_SIZE:-S}" != S ]]; then  # S keeps the config's encoder (ViT-S unless EXTRA_SET says otherwise)
+        SETS+=("encoder.dim=$dim" "encoder.depth=$depth" "encoder.heads=$heads")
+        [[ -n "$batch" ]] && ((batch > cap)) && batch=$cap
     fi
+    if [[ -n "$batch" ]]; then
+        for s in pretrain sr decoder e2e; do SETS+=("$s.batch_size=$batch"); done
+    fi
+    # tuning: every stage whose study ran (here or in TUNED_FROM_EXP) must find its best values, or it refuses to
+    # train (tune.require); TUNED_FROM_EXP is where they are read from when this experiment did not tune
+    local studies
+    studies="$(tuned_studies)"
+    if [[ -n "$studies" ]] && { ((${TUNE_THIS:-0})) || [[ -n "${TUNED_FROM_EXP:-}" ]]; }; then
+        SETS+=("tune.require=[${studies// /,}]")
+    fi
+    [[ -n "${TUNED_FROM_EXP:-}" ]] && SETS+=("tune.from_experiment=$TUNED_FROM_EXP")
+    local kv
+    for kv in ${N_TRIALS:-}; do SETS+=("tune.studies.${kv%%=*}.n_trials=${kv#*=}"); done
     for s in sr decoder probe e2e; do SETS+=("$s.patience=${PATIENCE:-null}"); done
     # jet energies fit fp16, so the whole train split stays on the GPU (falls back to fp32 if a value does not)
     [[ "$DATASET" == qg ]] && SETS+=("data.preload_dtype=float16")

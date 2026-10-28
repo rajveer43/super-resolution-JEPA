@@ -39,11 +39,11 @@ def _init(m):
 
 
 class Attention(nn.Module):
-    def __init__(self, dim, heads):
+    def __init__(self, dim, heads, dropout=0.0):
         super().__init__()
         if dim % heads:
             raise ValueError(f"dim {dim} not divisible by heads {heads}")
-        self.h = heads
+        self.h, self.dropout = heads, dropout
         self.qkv = nn.Linear(dim, 3 * dim)
         self.proj = nn.Linear(dim, dim)
 
@@ -52,27 +52,28 @@ class Attention(nn.Module):
         q, k, v = self.qkv(x).reshape(B, N, 3, self.h, C // self.h).permute(2, 0, 3, 1, 4)
         if cs is not None:
             q, k = apply_rope(q, cs), apply_rope(k, cs)
-        o = F.scaled_dot_product_attention(q, k, v, attn_mask=mask)
+        o = F.scaled_dot_product_attention(q, k, v, attn_mask=mask, dropout_p=self.dropout if self.training else 0.0)
         return self.proj(o.transpose(1, 2).reshape(B, N, C))
 
 
 class Block(nn.Module):
-    def __init__(self, dim, heads, mlp_ratio=4.0):
+    def __init__(self, dim, heads, mlp_ratio=4.0, dropout=0.0):
         super().__init__()
         self.n1, self.n2 = nn.LayerNorm(dim), nn.LayerNorm(dim)
-        self.attn = Attention(dim, heads)
+        self.attn = Attention(dim, heads, dropout)
         hid = int(dim * mlp_ratio)
         self.mlp = nn.Sequential(nn.Linear(dim, hid), nn.GELU(), nn.Linear(hid, dim))
+        self.drop = nn.Dropout(dropout)  # parameter-free: checkpoints without dropout still load
 
     def forward(self, x, cs=None, mask=None):
-        x = x + self.attn(self.n1(x), cs, mask)
-        return x + self.mlp(self.n2(x))
+        x = x + self.drop(self.attn(self.n1(x), cs, mask))
+        return x + self.drop(self.mlp(self.n2(x)))
 
 
 class _Trunk(nn.Module):
-    def __init__(self, dim, depth, heads, mlp_ratio, periodic, rope_base):
+    def __init__(self, dim, depth, heads, mlp_ratio, periodic, rope_base, dropout=0.0):
         super().__init__()
-        self.blocks = nn.ModuleList(Block(dim, heads, mlp_ratio) for _ in range(depth))
+        self.blocks = nn.ModuleList(Block(dim, heads, mlp_ratio, dropout) for _ in range(depth))
         self.norm = nn.LayerNorm(dim)
         self.rope = Rope3D(dim // heads, rope_base, periodic)
 
@@ -120,8 +121,8 @@ class MaskPredictor(_Trunk):
 
 class LatentSRPredictor(_Trunk):
     def __init__(self, enc_dim, dim, depth, heads, mlp_ratio=4.0, n_levels=3, cond_dim=0, residual=True,
-                 periodic=(False,) * 3, rope_base=1e4):
-        super().__init__(dim, depth, heads, mlp_ratio, periodic, rope_base)
+                 periodic=(False,) * 3, rope_base=1e4, dropout=0.0):
+        super().__init__(dim, depth, heads, mlp_ratio, periodic, rope_base, dropout)
         self.residual = residual
         self.embed = nn.Linear(enc_dim, dim)
         self.level_emb = nn.Parameter(torch.zeros(n_levels, dim))

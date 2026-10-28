@@ -17,7 +17,7 @@ print("torch", torch.__version__, "(ok)" if v >= (2, 2) else "- older than 2.2: 
 EOF
 
 missing=()
-for spec in numpy scipy sklearn:scikit-learn matplotlib yaml:pyyaml h5py pyarrow requests; do
+for spec in numpy scipy sklearn:scikit-learn matplotlib yaml:pyyaml h5py pyarrow requests optuna; do
     mod="${spec%%:*}"
     pkg="${spec#*:}"
     python -c "import $mod" 2> /dev/null || missing+=("$pkg")
@@ -27,7 +27,8 @@ if ((${#missing[@]})); then
     pip install --user "${missing[@]}"
 fi
 
-python -c "import sr_jepa.cli, sr_jepa.train.pretrain, sr_jepa.eval.evaluate; print('sr_jepa imports ok')"
+python -c "import sr_jepa.cli, sr_jepa.train.pretrain, sr_jepa.eval.evaluate, sr_jepa.tune, optuna; \
+print('sr_jepa imports ok | optuna', optuna.__version__)"
 mkdir -p "$ROOT"
 echo "data / results root: $ROOT  ($(df -h "$ROOT" | awk 'NR == 2 {print $4 " free"}'))"
 [[ "$ACCOUNT" == mXXXX* ]] && echo "NEXT: set ACCOUNT in slurm/settings.sh (your projects: run 'iris' or check https://iris.nersc.gov)"

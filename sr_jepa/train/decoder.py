@@ -11,20 +11,22 @@ import torch
 
 from ..data.datasets import make_loader
 from ..models.build import build_decoder, build_sr_predictor
-from ..pipeline import frozen_encoder, latents, pixel_loss
-from .common import Trainer, autocast, batches, load_modules, setup, stage_dir, train_augment
+from ..config import tuned_report
+from ..pipeline import SECTIONS, frozen_encoder, latents, pixel_loss
+from .common import Trainer, autocast, batches, load_modules, setup, stage_dir, train_augment, upstream_dir
 
 
-def run(cfg):
+def run(cfg, on_epoch=None):
+    tuned_report(cfg, "decoder")
     device, meta, L = setup(cfg)
     sec = cfg["decoder"]
     enc = frozen_encoder(cfg, L, device)
     P = None
     p_pred = float(sec["pred_latent_prob"])
-    sr_ck = os.path.join(cfg["paths"]["out"], "sr", "best.pt")
+    sr_ck = os.path.join(upstream_dir(cfg), "sr", "best.pt")
     if os.path.exists(sr_ck):
         P = build_sr_predictor(cfg, L)
-        load_modules(sr_ck, {"predictor": P})
+        load_modules(sr_ck, {"predictor": P}, cfg=cfg, sections=SECTIONS["predictor"])
         P = P.to(device).eval().requires_grad_(False)
     elif p_pred > 0:
         print(f"[decoder] {sr_ck} missing: training on E(HR) latents only")
@@ -34,7 +36,7 @@ def run(cfg):
     aug = train_augment(cfg, L)
     vloader = make_loader(cfg, "val", sec["batch_size"], False, sec["max_val"], device=device)
     out = stage_dir(cfg, "decoder")
-    tr = Trainer(cfg, sec, out, {"decoder": D}, [(D, 1.0)], len(loader))
+    tr = Trainer(cfg, sec, out, {"decoder": D}, [(D, 1.0)], len(loader), on_epoch)
     grid, K = L.grid(), len(L.levels) - 1
     g = torch.Generator(device="cpu").manual_seed(int(cfg["seed"]) + tr.step_n)
     while not tr.done:

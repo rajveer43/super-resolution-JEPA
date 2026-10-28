@@ -13,7 +13,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from .models.build import build_decoder, build_encoder, build_sr_predictor
-from .train.common import load_modules
+from .train.common import load_modules, upstream_dir
 
 VARIANTS = ("jepa", "e2e_jepa", "e2e_scratch")
 
@@ -49,14 +49,20 @@ class SRPipeline(nn.Module):
         return {"encoder": self.encoder, "predictor": self.predictor, "decoder": self.decoder}
 
 
+# config sections that must match a checkpoint of each network (load_modules checks them)
+SECTIONS = {"encoder": ("model", "encoder"), "predictor": ("model", "encoder", "sr"),
+            "decoder": ("model", "encoder", "decoder")}
+
+
 def frozen_encoder(cfg, L, device):
     enc = build_encoder(cfg, L)
-    load_modules(os.path.join(cfg["paths"]["out"], "pretrain", "last.pt"), {"target_encoder": enc})
+    load_modules(os.path.join(upstream_dir(cfg), "pretrain", "last.pt"), {"target_encoder": enc}, cfg=cfg,
+                 sections=SECTIONS["encoder"])
     return enc.to(device).eval().requires_grad_(False)
 
 
 def checkpoint_paths(cfg, variant):
-    out = cfg["paths"]["out"]
+    out = upstream_dir(cfg)
     if variant == "jepa":
         return {"encoder": (os.path.join(out, "pretrain", "last.pt"), "target_encoder"),
                 "predictor": (os.path.join(out, "sr", "best.pt"), "predictor"),
@@ -72,7 +78,7 @@ def available(cfg, variant):
 def load_pipeline(cfg, L, device, variant="jepa"):
     pipe = SRPipeline(cfg, L)
     for name, (path, key) in checkpoint_paths(cfg, variant).items():
-        load_modules(path, {key: getattr(pipe, name)})
+        load_modules(path, {key: getattr(pipe, name)}, cfg=cfg, sections=SECTIONS[name])
     return pipe.to(device).eval().requires_grad_(False)
 
 

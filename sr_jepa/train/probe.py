@@ -7,6 +7,7 @@ if latent SR works, the task performance from the SR latent moves from the LR va
 import torch
 import torch.nn.functional as F
 
+from ..config import tuned_report
 from ..data.datasets import make_loader
 from ..models.build import build_probe
 from ..pipeline import frozen_encoder, latents
@@ -24,7 +25,8 @@ def probe_loss(L, out, t):
     return (out[:, 0].float() - y).abs().mean()
 
 
-def run(cfg):
+def run(cfg, on_epoch=None):
+    tuned_report(cfg, "probe")
     device, meta, L = setup(cfg)
     sec = cfg["probe"]
     enc = frozen_encoder(cfg, L, device)
@@ -33,7 +35,7 @@ def run(cfg):
     aug = train_augment(cfg, L)
     vloader = make_loader(cfg, "val", sec["batch_size"], False, sec["max_val"], device=device)
     out = stage_dir(cfg, "probe")
-    tr = Trainer(cfg, sec, out, {"probe": probe}, [(probe, 1.0)], len(loader))
+    tr = Trainer(cfg, sec, out, {"probe": probe}, [(probe, 1.0)], len(loader), on_epoch)
     while not tr.done:
         probe.train()
         for _, hr, _, t in batches(loader, device, aug):

@@ -9,13 +9,19 @@ Stages, in pipeline order:
   train_probe    attentive probe on frozen latents (quark/gluon or E_inc), for the evaluation
   train_e2e      ablation: end-to-end fine-tuning (init jepa) and training from scratch (init scratch)
   evaluate       physics + latent metrics of every trained variant on the test split
-  all            every stage above, in order
+  all            every stage above, in order; with tune.enabled=true each preceded by its Optuna study
+
+Tuning (sr_jepa/tune.py): tune_pretrain, tune_sr, tune_decoder, tune_probe, tune_e2e_jepa, tune_e2e_scratch,
+tune_e2e (the studies of every init in e2e.inits). Each writes {out}/tuning/<study>/best_params.json, which every
+later stage of the experiment uses (see load_config).
 """
 import argparse
 
-from .config import load_config
+from .config import TUNE_STUDIES, load_config
 
 ORDER = ["download", "prepare", "pretrain", "train_sr", "train_decoder", "train_probe", "train_e2e", "evaluate"]
+TUNE_BEFORE = {"pretrain": ["tune_pretrain"], "train_sr": ["tune_sr"], "train_decoder": ["tune_decoder"],
+               "train_probe": ["tune_probe"], "train_e2e": ["tune_e2e"]}
 
 
 def run_stage(stage, cfg, force=False):
@@ -44,8 +50,16 @@ def run_stage(stage, cfg, force=False):
     elif stage == "evaluate":
         from .eval import evaluate
         evaluate.run(cfg)
+    elif stage == "tune_e2e":
+        from . import tune
+        for init in cfg["e2e"]["inits"]:
+            tune.run(cfg, f"e2e_{init}")
+    elif stage.startswith("tune_") and stage[len("tune_"):] in TUNE_STUDIES:
+        from . import tune
+        tune.run(cfg, stage[len("tune_"):])
     else:
-        raise ValueError(f"unknown stage {stage}; choose from {ORDER + ['all']}")
+        raise ValueError(f"unknown stage {stage}; choose from {ORDER + ['all', 'tune_e2e']} or "
+                         f"{['tune_' + s for s in TUNE_STUDIES]}")
 
 
 def main(argv=None):
@@ -55,11 +69,14 @@ def main(argv=None):
     ap.add_argument("--set", nargs="*", default=[], metavar="KEY=VALUE")
     ap.add_argument("--force", action="store_true", help="rebuild the data cache")
     a = ap.parse_args(argv)
-    cfg = load_config(a.config, a.set)
-    stages = ORDER if a.stages == ["all"] else a.stages
+    stages = a.stages
+    if stages == ["all"]:
+        tuned = load_config(a.config, a.set)["tune"]["enabled"]
+        stages = [t for s in ORDER for t in (TUNE_BEFORE.get(s, []) if tuned else []) + [s]]
     for s in stages:
         print(f"\n===== {s} =====")
-        run_stage(s, cfg, a.force)
+        # reloaded per stage: a study that just finished must reach the stages after it
+        run_stage(s, load_config(a.config, a.set), a.force)
 
 
 if __name__ == "__main__":

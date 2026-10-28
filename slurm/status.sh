@@ -51,12 +51,42 @@ for s in pretrain sr decoder probe e2e_jepa e2e_scratch; do
     last_epoch "$exp/$s/history.csv"
 done
 echo "$(mark "$exp/evaluation/summary.md") evaluate  evaluation/summary.md"
+
+echo
+echo "---- tuning (studies of this experiment, or the values it reuses)"
+python3 - "$exp" "${TUNED_FROM_EXP:-}" "$(tuned_studies)" << 'EOF'
+import csv, json, os, sys
+exp, reused, studies = sys.argv[1], sys.argv[2], sys.argv[3].split()
+if not studies:
+    print("(TUNE_STAGES is empty)")
+for s in studies:
+    d = os.path.join(reused or exp, "tuning", s)
+    states = {}
+    if os.path.exists(os.path.join(d, "trials.csv")):
+        for r in csv.DictReader(open(os.path.join(d, "trials.csv"))):
+            states[r["state"].lower()] = states.get(r["state"].lower(), 0) + 1
+    best = os.path.join(d, "best_params.json")
+    line = f"{s:12s} trials {states or '-'}"
+    if os.path.exists(best):
+        b = json.load(open(best))
+        line += f" | best {b['value']:.4g} (trial {b['trial']})"
+    print(line + ("" if not reused else f"  [from {reused}]"))
+    if os.path.exists(best):
+        print("             " + ", ".join(f"{k}={v:.4g}" if isinstance(v, float) else f"{k}={v}"
+                                          for k, v in b["params"].items() if k != "masks"))
+    cfg = os.path.join(exp, s, "config.json")
+    if os.path.exists(cfg):
+        applied = json.load(open(cfg)).get("_tuned", {}).get("applied", {})
+        print("             final stage trained with the tuned values" if s in applied
+              else "             !! final stage trained WITHOUT this study's values")
+EOF
 compgen -G "$ROOT/results_${DATASET}_${EXPERIMENT}*.tar.gz" > /dev/null \
     && echo "packed: $(ls "$ROOT"/results_"${DATASET}"_"${EXPERIMENT}"*.tar.gz)"
 
 echo
 echo "---- end of the latest log of each stage ($logdir)"
-for stage in prepare pretrain sr decoder probe e2e-scratch e2e-jepa evaluate smoke; do
+for stage in prepare tune-pretrain pretrain tune-sr sr tune-decoder decoder tune-probe probe tune-e2e_scratch \
+    e2e-scratch tune-e2e_jepa e2e-jepa evaluate smoke; do
     # shellcheck disable=SC2012
     f="$(ls -t "$logdir/$stage"-*.out 2> /dev/null | head -1)"
     [[ -n "$f" ]] || continue

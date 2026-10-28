@@ -27,7 +27,8 @@ name="${DATASET}_${EXPERIMENT}"
 suffix=""
 ((with_ckpt)) && suffix="_with_checkpoints"
 out="$ROOT/results_${name}${suffix}.tar.gz"
-exclude=(--exclude='*.tmp')
+# tuning: best_params.json, trials.csv, plots and the study journal; not the per-trial folders
+exclude=(--exclude='*.tmp' --exclude="$name/tuning/*/trial_*")
 if ((with_ckpt)); then
     for s in sr decoder probe e2e_jepa e2e_scratch; do exclude+=(--exclude="$name/$s/last.pt"); done
 else

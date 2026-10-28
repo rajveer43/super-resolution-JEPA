@@ -10,20 +10,29 @@ import os
 import torch
 
 from ..data.datasets import make_loader
-from ..pipeline import SRPipeline, checkpoint_paths, pixel_loss
+from ..config import tuned_report
+from ..pipeline import SECTIONS, SRPipeline, checkpoint_paths, pixel_loss
 from .common import Trainer, autocast, batches, load_modules, setup, stage_dir, train_augment
 
 
-def run(cfg, init):
+def section(cfg, init):
+    """The e2e settings of one init: the shared e2e keys, overridden by e2e.per_init.<init> (tuned per init)."""
+    sec = {k: v for k, v in cfg["e2e"].items() if k != "per_init"}
+    sec.update((cfg["e2e"].get("per_init") or {}).get(init) or {})
+    return sec
+
+
+def run(cfg, init, on_epoch=None):
     if init not in ("jepa", "scratch"):
         raise ValueError(f"e2e init must be jepa or scratch, not {init}")
+    tuned_report(cfg, f"e2e_{init}")
     device, meta, L = setup(cfg)
-    sec = cfg["e2e"]
+    sec = section(cfg, init)
     pipe = SRPipeline(cfg, L)
     if init == "jepa":
         for name, (path, key) in checkpoint_paths(cfg, "jepa").items():
             if os.path.exists(path):
-                load_modules(path, {key: getattr(pipe, name)})
+                load_modules(path, {key: getattr(pipe, name)}, cfg=cfg, sections=SECTIONS[name])
                 print(f"[e2e_jepa] {name} <- {path}")
             elif name == "encoder":
                 raise FileNotFoundError(f"{path} missing: run `pretrain` first")
@@ -34,7 +43,7 @@ def run(cfg, init):
     out = stage_dir(cfg, f"e2e_{init}")
     enc_scale = sec["encoder_lr_scale"] if init == "jepa" else 1.0
     tr = Trainer(cfg, sec, out, pipe.modules_dict(),
-                 [(pipe.encoder, enc_scale), (pipe.predictor, 1.0), (pipe.decoder, 1.0)], len(loader))
+                 [(pipe.encoder, enc_scale), (pipe.predictor, 1.0), (pipe.decoder, 1.0)], len(loader), on_epoch)
     while not tr.done:
         pipe.train()
         for _, hr, lr, t in batches(loader, device, aug):

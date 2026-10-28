@@ -10,6 +10,7 @@ c is the condition token (level, and E_inc for showers, like the AC action/state
 """
 import torch
 
+from ..config import tuned_report
 from ..data.datasets import make_loader
 from ..models.build import build_sr_predictor
 from ..pipeline import encode_levels, frozen_encoder
@@ -24,7 +25,8 @@ def sr_losses(P, zs, cond, grid, grad_steps=1):
     return tf, ro
 
 
-def run(cfg):
+def run(cfg, on_epoch=None):
+    tuned_report(cfg, "sr")
     device, meta, L = setup(cfg)
     sec = cfg["sr"]
     enc = frozen_encoder(cfg, L, device)
@@ -34,7 +36,7 @@ def run(cfg):
     aug = train_augment(cfg, L)
     vloader = make_loader(cfg, "val", sec["batch_size"], False, sec["max_val"], device=device)
     out = stage_dir(cfg, "sr")
-    tr = Trainer(cfg, sec, out, {"predictor": P}, [(P, 1.0)], len(loader))
+    tr = Trainer(cfg, sec, out, {"predictor": P}, [(P, 1.0)], len(loader), on_epoch)
     grid = L.grid()
     while not tr.done:
         P.train()

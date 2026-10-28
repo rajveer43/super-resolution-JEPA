@@ -22,7 +22,7 @@ def build_sr_predictor(cfg, layout):
     s = cfg["sr"]
     return LatentSRPredictor(cfg["encoder"]["dim"], s["dim"], s["depth"], s["heads"], s["mlp_ratio"],
                              n_levels=len(layout.levels), cond_dim=layout.cond_dim, residual=s["residual"],
-                             **_common(cfg, layout))
+                             dropout=float(s.get("dropout", 0.0)), **_common(cfg, layout))
 
 
 def build_decoder(cfg, layout):

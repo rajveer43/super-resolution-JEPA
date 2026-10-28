@@ -59,7 +59,7 @@ def run(cfg):
     probe_ck = os.path.join(cfg["paths"]["out"], "probe", "best.pt")
     if os.path.exists(probe_ck):
         probe = build_probe(cfg, 1)
-        load_modules(probe_ck, {"probe": probe})
+        load_modules(probe_ck, {"probe": probe}, cfg=cfg, sections=("encoder", "probe"))
         probe = probe.to(device).eval()
     methods = ["lr_up"] + variants
     print(f"evaluating {methods} on up to {ev['max_events']} test events")
@@ -145,6 +145,10 @@ def run(cfg):
         metrics["methods"][m] = res
     if probe is not None:
         metrics["probe_on_truth"] = _probe_metrics(L, cat(truth["probe"]), target)
+    # which hyperparameters the evaluated models were trained with: tuned values and their source
+    metrics["hyperparameters"] = {"tuned": {k: v for k, v in cfg["_tuned"]["applied"].items()},
+                                  "overridden_by_set": cfg["_tuned"]["overridden"],
+                                  "encoder": cfg["encoder"]}
 
     with open(os.path.join(out, "metrics.json"), "w") as f:
         json.dump(metrics, f, indent=2)
@@ -195,7 +199,25 @@ def summary_markdown(metrics, methods):
     for k in obs:
         lines.append(f"| {k} | " + " | ".join(
             "{w1_over_sigma:.3f} ({ks:.3f}) [{pearson_r:.3f}]".format(**M[m]["observables"][k]) for m in methods) + " |")
+    hp = metrics.get("hyperparameters")
+    if hp:
+        enc = hp["encoder"]
+        lines += ["", "## Hyperparameters", "",
+                  f"Encoder: dim {enc['dim']}, depth {enc['depth']}, heads {enc['heads']}.", ""]
+        if hp["tuned"]:
+            lines += ["| study | tuned values | source |", "|---|---|---|"]
+            for study, t in hp["tuned"].items():
+                vals = ", ".join(f"`{k}`={_fmt(v)}" for k, v in t["params"].items())
+                lines.append(f"| {study} | {vals} | `{t['source']}` |")
+        else:
+            lines.append("No tuned values: every stage used the config values.")
+        for key, o in hp["overridden_by_set"].items():
+            lines.append(f"- tuned `{key}`={_fmt(o['tuned'])} was overridden by --set to {_fmt(o['set'])}")
     return "\n".join(lines) + "\n"
+
+
+def _fmt(v):
+    return f"{v:.4g}" if isinstance(v, float) else repr(v) if isinstance(v, (list, dict)) else str(v)
 
 
 def _figures(out, L, geom, examples, obs, tobs, bins):

@@ -20,6 +20,21 @@ E2E_INITS="jepa scratch"      # ablations: end-to-end fine-tuning from JEPA and 
 EXTRA_SET=""                  # extra config overrides, space separated key=value (YAML values), e.g.
                               # "pretrain.epochs=200 encoder.dim=768 encoder.heads=12"
 
+# ---- hyperparameter tuning (Optuna; sr_jepa/tune.py) ---------------------------------------------
+TUNE=0                        # 1 = an Optuna study before each stage in TUNE_STAGES; every later run of the experiment
+                              # uses its best values, and a stage refuses to train if its study has no result
+TUNE_STAGES="pretrain sr decoder probe e2e"   # e2e = one study per init in E2E_INITS (same budget each)
+TUNE_WORKERS=4                # parallel workers per study: a job array sharing one study, one GPU each
+N_TRIALS=""                   # optional, e.g. "sr=60 decoder=20"; defaults (and budgets) in sr_jepa/config.py TUNE
+TUNED_FROM=                   # reuse the tuned values of an earlier experiment instead of tuning again, e.g.
+                              # $SCRATCH/sr_jepa/experiments/qg/2026-10-28_vjepa2-baseline (checked at submit time)
+
+# ---- encoder size (explicit comparison of full runs, not part of the search) ----------------------
+ENCODERS="S"                  # one full pipeline per size: S = ViT-S (dim 384, depth 12) | B = ViT-B (768, 12) |
+                              # L = ViT-L (1024, 24). E.g. "S B". With several, each experiment gets the suffix -vit<X>;
+                              # only the first size is tuned, the others reuse its tuned values, and a final job
+                              # compares them. B and L train with batch min(BATCH, 128 / 64) (memory, estimated).
+
 # ---- where things go -----------------------------------------------------------------------------
 ROOT="$SCRATCH/sr_jepa"       # raw/ cache/ experiments/ logs/ live here ($SCRATCH: fast, purged after 8 weeks unused)
 CFS_COPY=                     # optional, e.g. /global/cfs/cdirs/mXXXX/sr_jepa: results are copied here at the end
@@ -34,4 +49,6 @@ TIME_DECODER=06:00:00
 TIME_PROBE=02:00:00
 TIME_E2E=08:00:00
 TIME_EVAL=02:00:00
+TIME_TUNE=12:00:00            # per tuning worker
+TIME_COMPARE=00:30:00
 MAX_REQUEUE=5
