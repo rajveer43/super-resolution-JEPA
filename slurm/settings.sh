@@ -15,7 +15,7 @@ NGPUS=1                       # GPUs per training job (pretrain, sr, decoder, pr
 # ---- what to run ---------------------------------------------------------------------------------
 DATASET=qg                    # qg (CMS quark/gluon jets) | calo (CaloChallenge DS2)
 RUN_TAG=vjepa2-baseline       # what this experiment tests, in words joined by '-' (letters, digits, '-', '.')
-RUN_DATE=                     # empty = today (Asia/Kolkata) -> new experiment; e.g. 2026-10-28 to resume one
+RUN_DATE=2026-11-03           # empty = today (Asia/Kolkata) -> new experiment; e.g. 2026-10-28 to resume one
                               # -> experiment folder <RUN_DATE>_<RUN_TAG>, e.g. 2026-10-28_vjepa2-baseline
 MAX_EVENTS=                   # empty = all (qg: 139k jets; calo: 100k showers from dataset_2_1)
 BATCH=256                     # GLOBAL batch size (all GPUs together), learning rates scale with sqrt(batch). Each stage
@@ -27,7 +27,7 @@ EXTRA_SET=""                  # extra config overrides, space separated key=valu
                               # "pretrain.epochs=200 encoder.dim=768 encoder.heads=12"
 
 # ---- hyperparameter tuning (Optuna; sr_jepa/tune.py) ---------------------------------------------
-TUNE=0                        # 1 = an Optuna study before each stage in TUNE_STAGES; every later run of the experiment
+TUNE=1                        # 1 = an Optuna study before each stage in TUNE_STAGES; every later run of the experiment
                               # uses its best values, and a stage refuses to train if its study has no result
 TUNE_STAGES="pretrain sr decoder probe e2e"   # e2e = one study per init in E2E_INITS (same budget each)
 TUNE_WORKERS=4                # parallel workers per study: a job array sharing one study, one GPU each
