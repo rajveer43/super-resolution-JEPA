@@ -5,8 +5,12 @@
 # ---- account and resources ----------------------------------------------------------------------
 ACCOUNT=mXXXX                 # NERSC project with GPU hours (some GPU allocations are named mXXXX_g)
 CPU_ACCOUNT=                  # optional project with CPU hours for download + prepare; empty = use a GPU job
-QOS=shared                    # shared (1 GPU, charged per GPU: recommended) | regular (whole node) | preempt
+QOS=shared                    # shared (a part of a node, charged per GPU) | regular (whole node = 4 GPUs) | preempt
 GPU_MEM=40                    # 40 | 80 (80 GB A100s are fewer, so they may queue longer)
+NGPUS=1                       # GPUs per training job (pretrain, sr, decoder, probe, e2e), data parallel on one node, 1-4.
+                              # 4 = a whole node: use QOS=regular (shared may refuse a request that large). The global
+                              # BATCH is split over the GPUs, so results do not depend on this number; the memory per GPU
+                              # and the time per epoch drop with it
 
 # ---- what to run ---------------------------------------------------------------------------------
 DATASET=qg                    # qg (CMS quark/gluon jets) | calo (CaloChallenge DS2)
@@ -14,7 +18,9 @@ RUN_TAG=vjepa2-baseline       # what this experiment tests, in words joined by '
 RUN_DATE=                     # empty = today (Asia/Kolkata) -> new experiment; e.g. 2026-10-28 to resume one
                               # -> experiment folder <RUN_DATE>_<RUN_TAG>, e.g. 2026-10-28_vjepa2-baseline
 MAX_EVENTS=                   # empty = all (qg: 139k jets; calo: 100k showers from dataset_2_1)
-BATCH=256                     # training batch size of every stage on one A100; learning rates scale with sqrt(batch)
+BATCH=256                     # GLOBAL batch size (all GPUs together), learning rates scale with sqrt(batch). Each stage
+                              # is capped to what fits in memory (stage_batch_cap in common.sh): sr and e2e need far more
+                              # memory per event than pretraining, so BATCH=256 on ONE 40 GB GPU runs out of memory there
 PATIENCE=5                    # early stopping (epochs) for SR, decoder, probe and e2e; pretraining runs its schedule
 E2E_INITS="jepa scratch"      # ablations: end-to-end fine-tuning from JEPA and training from scratch; "" = none
 EXTRA_SET=""                  # extra config overrides, space separated key=value (YAML values), e.g.
@@ -49,6 +55,7 @@ TIME_DECODER=06:00:00
 TIME_PROBE=02:00:00
 TIME_E2E=08:00:00
 TIME_EVAL=02:00:00
+TIME_PACK=00:30:00
 TIME_TUNE=12:00:00            # per tuning worker
 TIME_COMPARE=00:30:00
 MAX_REQUEUE=5

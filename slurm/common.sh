@@ -46,6 +46,21 @@ encoder_preset() {
 
 die() { echo "ERROR: $*" >&2; exit 1; }
 
+# Largest batch PER GPU of each stage on a 40 GB A100 (x GPU_MEM / 40 for 80 GB), for the S encoder at 128 x 128
+# jets. Estimates from the stages' memory profiles, measured against the one failure we have (SR and e2e at 256
+# on one GPU: out of memory in the first step, while pretraining at 256 was fine): pretraining sees 64 tokens per
+# event and only the unmasked ones; SR attends over 2 x 257 tokens twice with gradients; e2e adds the encoder and
+# the decoder to that. The training split (11.6 GB in fp16) also lives on the GPU unless it is sharded over GPUs.
+stage_batch_cap() {
+    case "$1" in
+        pretrain) echo 256 ;;
+        sr) echo 64 ;;
+        decoder) echo 128 ;;
+        e2e) echo 32 ;;
+        *) die "no batch cap for stage '$1'" ;;
+    esac
+}
+
 # For scripts run by hand after submission: load the frozen settings of one experiment.
 #   load_experiment ""         the most recently submitted one
 #   load_experiment <name>     that one, e.g. 2026-10-28_vjepa2-baseline
@@ -112,6 +127,7 @@ setup_python() {
     fi
     export PYTHONPATH="$REPO${PYTHONPATH:+:$PYTHONPATH}"
     export PYTHONUNBUFFERED=1
+    export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True    # less fragmentation (PyTorch's own OOM advice)
     export MPLBACKEND=Agg
     local cpus="${SLURM_CPUS_PER_TASK:-4}"
     PHYS_CORES=$((cpus > 1 ? cpus / 2 : 1))   # Perlmutter: 2 hardware threads per core
@@ -125,7 +141,7 @@ job_header() {
     echo "job        : ${SLURM_JOB_ID:-local} (restart ${SLURM_RESTART_COUNT:-0}) on $(hostname)"
     echo "started    : $(date '+%Y-%m-%d %H:%M:%S %Z')"
     echo "code       : $(git -C "$REPO" rev-parse --abbrev-ref HEAD 2> /dev/null) $(git -C "$REPO" rev-parse --short HEAD 2> /dev/null)"
-    echo "settings   : dataset=$DATASET max_events=${MAX_EVENTS:-all} batch=$BATCH patience=$PATIENCE qos=$QOS extra='$EXTRA_SET'"
+    echo "settings   : dataset=$DATASET max_events=${MAX_EVENTS:-all} batch=$BATCH gpus=${NGPUS:-1} patience=$PATIENCE qos=$QOS extra='$EXTRA_SET'"
     echo "encoder    : ${ENCODER_SIZE:-S} | tuning: $( ((${TUNE_THIS:-0})) && echo "studies '$(tuned_studies)' in this experiment" \
         || { [[ -n "${TUNED_FROM_EXP:-}" ]] && echo "values from $TUNED_FROM_EXP" || echo off; })"
     python -c 'import sys, torch; print("python", sys.version.split()[0], "| torch", torch.__version__, "| cuda", torch.cuda.is_available())'
@@ -142,14 +158,25 @@ pipeline_sets() {
     local workers=$((PHYS_CORES > 2 ? PHYS_CORES / 2 : 1)) s
     SETS=("run_name=$EXPERIMENT" "paths.raw=$(raw_dir)" "paths.cache=$(cache_dir)" "paths.out=$(experiment_dir)"
           "num_workers=$workers" "data.max_events=${MAX_EVENTS:-null}")
-    local dim depth heads cap batch="${BATCH:-}"
+    local dim depth heads cap batch="${BATCH:-}" gpus="${NGPUS:-1}" b c
     read -r dim depth heads cap <<< "$(encoder_preset "${ENCODER_SIZE:-S}")"
     if [[ "${ENCODER_SIZE:-S}" != S ]]; then  # S keeps the config's encoder (ViT-S unless EXTRA_SET says otherwise)
         SETS+=("encoder.dim=$dim" "encoder.depth=$depth" "encoder.heads=$heads")
-        [[ -n "$batch" ]] && ((batch > cap)) && batch=$cap
+    else
+        cap=1024
     fi
     if [[ -n "$batch" ]]; then
-        for s in pretrain sr decoder e2e; do SETS+=("$s.batch_size=$batch"); done
+        # the global batch of each stage: BATCH, capped by what fits per GPU, and a multiple of the GPU count
+        for s in pretrain sr decoder e2e; do
+            c=$(($(stage_batch_cap "$s") * ${GPU_MEM:-40} / 40))
+            ((c > cap)) && c=$cap
+            b=$batch
+            ((b > c * gpus)) && b=$((c * gpus))
+            b=$((b / gpus * gpus))
+            ((b > 0)) || die "batch of $s: $batch events cannot be split over $gpus GPUs"
+            [[ "$b" != "$batch" ]] && echo "batch $s: $batch -> $b ($((b / gpus)) per GPU, the most that fits)"
+            SETS+=("$s.batch_size=$b")
+        done
     fi
     # tuning: every stage whose study ran (here or in TUNED_FROM_EXP) must find its best values, or it refuses to
     # train (tune.require); TUNED_FROM_EXP is where they are read from when this experiment did not tune
@@ -190,7 +217,16 @@ run_stage() {
     read -r -a stages <<< "$1"
     shift
     pipeline_sets
-    local -a cmd=(python -u -m sr_jepa "${stages[@]}" -c "$REPO/configs/${CONFIG:-$DATASET}.yaml"
+    local -a launch=(python -u -m sr_jepa)
+    local gpus="${NGPUS:-1}"
+    case "${stages[0]}" in
+        pretrain | train_sr | train_decoder | train_probe | train_e2e)    # data parallel: one process per GPU
+            if ((gpus > 1)); then
+                launch=(python -u -m torch.distributed.run --standalone --nproc_per_node="$gpus" -m sr_jepa)
+                export OMP_NUM_THREADS=$((PHYS_CORES > gpus ? PHYS_CORES / gpus : 1))
+            fi ;;
+    esac
+    local -a cmd=("${launch[@]}" "${stages[@]}" -c "$REPO/configs/${CONFIG:-$DATASET}.yaml"
                   --set "${SETS[@]}" "$@")
     echo "+ ${cmd[*]}"
     local t0=$SECONDS rc pid

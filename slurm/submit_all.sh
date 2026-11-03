@@ -9,6 +9,8 @@
 # Stages: prepare -> pretrain -> sr -> decoder ----------------> e2e (jepa) --\
 #                       \-> probe ------------------------------------------------> evaluate + pack
 #            \-> e2e (scratch) ----------------------------------------------------/
+# A final "pack" job runs after all of them whatever their outcome, so a failed stage cannot leave the logs and
+# checkpoints of the finished ones unpacked. NGPUS > 1: the training stages run data parallel on that many GPUs.
 # TUNE=1: an Optuna study (job array of TUNE_WORKERS workers) runs right before each stage in TUNE_STAGES; the
 # stage trains with its best values. ENCODERS="S B": one such chain per encoder size (only the first is tuned,
 # the others reuse its values), then a job that compares them.
@@ -42,6 +44,9 @@ wanted() { (($(stage_index "$1") >= FROM_I)); }
 
 load_settings
 unset RUN_ENV
+NGPUS="${NGPUS:-1}"
+[[ "$NGPUS" =~ ^[1-4]$ ]] || die "NGPUS must be 1, 2, 3 or 4 (GPUs of one node), not '$NGPUS'"
+TIME_PACK="${TIME_PACK:-00:30:00}"
 if ((!SMOKE)) && [[ "$FROM" != prepare && -z "$RUN_DATE" ]]; then
     # a restart continues the latest experiment with this tag, even on a later day
     RUN_DATE="$(latest_experiment_date)"
@@ -85,17 +90,24 @@ sub() {
     else
         args+=(-o "$LOGDIR/${name}-%j.out")
     fi
-    if [[ "$name" == prepare && -n "$CPU_ACCOUNT" ]]; then
+    # GPUs of this job: the training stages use NGPUS (data parallel), everything else one
+    local ngpu=1
+    case "$name" in pretrain | sr | decoder | probe | e2e-*) ngpu=$NGPUS ;; esac
+    if [[ "$name" == pack && -n "$CPU_ACCOUNT" ]]; then
+        args+=(-A "$CPU_ACCOUNT" -C cpu -q shared -c 4)
+    elif [[ "$name" == prepare && -n "$CPU_ACCOUNT" ]]; then
         args+=(-A "$CPU_ACCOUNT" -C cpu -q shared -c 32)
     elif ((SMOKE)); then
         args+=(-A "$ACCOUNT" -C gpu -q debug --gpus=1 -c 32)
     else
         local constraint=gpu
         [[ "$GPU_MEM" == 80 ]] && constraint="gpu&hbm80g"
-        args+=(-A "$ACCOUNT" -C "$constraint" -q "$QOS" --gpus=1 -c 32)
-        [[ "$QOS" == regular ]] && args+=(-N 1)
+        local qos="$QOS"
+        [[ "$name" == pack ]] && qos=shared    # only tars files: never a whole node
+        args+=(-A "$ACCOUNT" -C "$constraint" -q "$qos" --gpus="$ngpu" -c $((32 * ngpu)))    # 32 threads per GPU
+        { [[ "$qos" == regular ]] || ((ngpu > 1)); } && args+=(-N 1)
         # training and tuning: requeue on preemption and, via USR1 10 min before the limit, on timeout
-        [[ "$name" != prepare && "$name" != evaluate && "$name" != compare ]] && args+=(--requeue --signal=B:USR1@600)
+        case "$name" in prepare | evaluate | compare | pack) ;; *) args+=(--requeue --signal=B:USR1@600) ;; esac
     fi
     [[ -n "$dep" ]] && args+=(--dependency="$dep")
     args+=("$REPO/slurm/$script")
@@ -124,7 +136,7 @@ dep() {
 # freeze the settings of the current experiment for its jobs
 write_env() {
     local v
-    for v in REPO ROOT EXPERIMENT ACCOUNT CPU_ACCOUNT QOS GPU_MEM DATASET RUN_TAG RUN_DATE MAX_EVENTS BATCH PATIENCE \
+    for v in REPO ROOT EXPERIMENT ACCOUNT CPU_ACCOUNT QOS GPU_MEM NGPUS DATASET RUN_TAG RUN_DATE MAX_EVENTS BATCH PATIENCE \
              E2E_INITS EXTRA_SET CFS_COPY MAX_REQUEUE ENCODER_SIZE TUNE_THIS TUNED_FROM_EXP TUNE_STAGES TUNE_WORKERS \
              N_TRIALS; do
         printf 'export %s=%q\n' "$v" "${!v}"
@@ -228,6 +240,14 @@ for idx in "${!ENCODER_LIST[@]}"; do
         EV=$(sub evaluate "$TIME_EVAL" 07_evaluate.slurm \
             "$(dep "afterok:$DEC" "afterany:$PR" "afterany:$EJ" "afterany:$ES")")
     fi
+    # last job of the experiment: pack whatever exists, also when a stage failed (afterany on every job above), so
+    # the logs, histories and checkpoints are never left behind on $SCRATCH just because the chain broke
+    pk=()
+    for j in "$P" "$PT" "$SR" "$DEC" "$PR" "$EJ" "$ES" "$EV" "$(tj pretrain)" "$(tj sr)" "$(tj decoder)" \
+             "$(tj probe)" "$(tj e2e_scratch)" "$(tj e2e_jepa)"; do
+        [[ -n "$j" ]] && pk+=("afterany:$j")
+    done
+    ((${#pk[@]})) && sub pack "$TIME_PACK" 09_pack.slurm "$(dep "${pk[@]}")" > /dev/null
     EVALS+=("$EV")
     EXPS+=("$(experiment_dir)")
 done

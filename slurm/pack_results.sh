@@ -44,6 +44,18 @@ logdir="$(dirname "$RUN_ENV")"
 tar -czhf "$out" "${exclude[@]}" -C "$stage_dir" .
 echo "packed $(du -h "$out" | cut -f1)  $out"
 
+# what the experiment actually produced: a stage that crashed before its first epoch has neither file
+printf '  %-14s %-12s %-8s %-8s\n' stage history.csv best.pt last.pt
+for s in pretrain sr decoder probe e2e_jepa e2e_scratch evaluation; do
+    [[ -d "$exp/$s" ]] || { printf '  %-14s (no folder: the stage never started or never reached its first epoch)\n' "$s"; continue; }
+    h=no; b=no; l=no
+    [[ -f "$exp/$s/history.csv" ]] && h="$(($(wc -l < "$exp/$s/history.csv") - 1)) epochs"
+    [[ -f "$exp/$s/best.pt" ]] && b=yes
+    [[ -f "$exp/$s/last.pt" ]] && l=yes
+    printf '  %-14s %-12s %-8s %-8s\n' "$s" "$h" "$b" "$l"
+done
+((with_ckpt)) || echo "  (checkpoints are not in this tarball; ${name}_with_checkpoints.tar.gz has them)"
+
 if [[ -n "${CFS_COPY:-}" ]]; then
     mkdir -p "$CFS_COPY"
     cp "$out" "$CFS_COPY/"

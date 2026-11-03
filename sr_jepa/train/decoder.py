@@ -9,6 +9,7 @@ import os
 
 import torch
 
+from .. import dist
 from ..data.datasets import make_loader
 from ..models.build import build_decoder, build_sr_predictor
 from ..config import tuned_report
@@ -38,7 +39,7 @@ def run(cfg, on_epoch=None):
     out = stage_dir(cfg, "decoder")
     tr = Trainer(cfg, sec, out, {"decoder": D}, [(D, 1.0)], len(loader), on_epoch)
     grid, K = L.grid(), len(L.levels) - 1
-    g = torch.Generator(device="cpu").manual_seed(int(cfg["seed"]) + tr.step_n)
+    g = torch.Generator(device="cpu").manual_seed(int(cfg["seed"]) + tr.step_n + 7919 * dist.rank())
     while not tr.done:
         D.train()
         for _, hr, lr, t in batches(loader, device, aug):

@@ -12,6 +12,7 @@ import copy
 
 import torch
 
+from .. import dist
 from ..config import tuned_report
 from ..data.datasets import make_loader
 from ..masks import sample_masks
@@ -63,7 +64,7 @@ def run(cfg, on_epoch=None):
     out = stage_dir(cfg, "pretrain")
     tr = Trainer(cfg, sec, out, {"encoder": enc, "predictor": pred, "target_encoder": target},
                  [(enc, 1.0), (pred, 1.0)], len(loader), on_epoch)
-    g = torch.Generator().manual_seed(int(cfg["seed"]) + tr.step_n)
+    g = torch.Generator().manual_seed(int(cfg["seed"]) + tr.step_n + 7919 * dist.rank())  # other masks per rank
     while not tr.done:
         enc.train()
         pred.train()

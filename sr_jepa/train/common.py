@@ -9,6 +9,7 @@ import time
 import numpy as np
 import torch
 
+from .. import dist
 from ..config import save_config
 from ..data.datasets import Layout, load_meta
 
@@ -25,6 +26,7 @@ def pick_device(cfg):
 
 
 def seed_all(seed):
+    seed += 7919 * dist.rank()   # a shared seed would give every rank the same flips; weights are broadcast anyway
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
@@ -167,13 +169,15 @@ class Trainer:
         self._acc = {}
         self._t0 = self._te = time.time()
         self._epoch_steps = 0
-        save_config(cfg, os.path.join(out, "config.json"))
+        if dist.is_main():
+            save_config(cfg, os.path.join(out, "config.json"))
         last = os.path.join(out, "last.pt")
         if os.path.exists(last):
             ck = load_modules(last, modules)
             self.opt.load_state_dict(ck["opt"])
             self.step_n, self.epoch, self.best, self.bad = ck["step"], ck["epoch"], ck["best"], ck["bad"]
             print(f"[{os.path.basename(out)}] resumed at epoch {self.epoch}, step {self.step_n}")
+        dist.broadcast_state(modules.values())    # data parallel: every rank starts from rank 0's weights
 
     @property
     def done(self):
@@ -189,6 +193,7 @@ class Trainer:
         self.set_lr()
         self.opt.zero_grad(set_to_none=True)
         loss.backward()
+        self.sync_grads()
         if self.sec.get("grad_clip"):
             torch.nn.utils.clip_grad_norm_(self.params, self.sec["grad_clip"])
         self.opt.step()
@@ -199,12 +204,25 @@ class Trainer:
             s, n = self._acc.get(k, (0.0, 0))
             self._acc[k] = (s + (v.detach().float() if torch.is_tensor(v) else float(v)), n + 1)
 
+    def sync_grads(self):
+        """Data parallel: average the gradients over the ranks, one all-reduce for the whole model. A parameter
+        that got no gradient on this rank counts as zero, so every rank reduces the same list."""
+        if not dist.active():
+            return
+        for p in self.params:
+            if p.grad is None:
+                p.grad = torch.zeros_like(p)
+        dist.all_reduce_mean([p.grad for p in self.params])
+
     def end_epoch(self, val):
-        """val: dict with at least 'loss'. Writes history, checkpoints; prints a line."""
+        """val: dict with at least 'loss' (this rank's shard; averaged over the ranks here). Writes history and
+        checkpoints (rank 0 only); prints a line."""
         self.epoch += 1
+        train = dist.mean_dict({k: float(s) / max(n, 1) for k, (s, n) in self._acc.items()})
+        val = dist.mean_dict({k: float(v) for k, v in val.items()})
         row = {"epoch": self.epoch, "step": self.step_n, "lr": self.lr * wcd_factor(self.step_n, self.total, self.sec)}
-        row.update({f"train_{k}": float(s) / max(n, 1) for k, (s, n) in self._acc.items()})
-        row.update({f"val_{k}": float(v) for k, v in val.items()})
+        row.update({f"train_{k}": v for k, v in train.items()})
+        row.update({f"val_{k}": v for k, v in val.items()})
         now = time.time()
         row["events_per_s"] = self._epoch_steps * self.sec["batch_size"] / max(now - self._te, 1e-9)
         row["minutes"] = (now - self._t0) / 60
@@ -212,18 +230,20 @@ class Trainer:
         improved = val["loss"] < self.best - 1e-6
         if improved:
             self.best, self.bad = float(val["loss"]), 0
-            save_modules(os.path.join(self.out, "best.pt"), self.modules, self.arch, epoch=self.epoch, val=val)
         else:
             self.bad += 1
-        save_modules(os.path.join(self.out, "last.pt"), self.modules, self.arch, opt=self.opt.state_dict(),
-                     step=self.step_n, epoch=self.epoch, best=self.best, bad=self.bad)
-        path = os.path.join(self.out, "history.csv")
-        new = not os.path.exists(path)
-        with open(path, "a", newline="") as f:
-            w = csv.DictWriter(f, fieldnames=list(row))
-            if new:
-                w.writeheader()
-            w.writerow(row)
+        if dist.is_main():    # the replicas are identical: one copy of the files
+            if improved:
+                save_modules(os.path.join(self.out, "best.pt"), self.modules, self.arch, epoch=self.epoch, val=val)
+            save_modules(os.path.join(self.out, "last.pt"), self.modules, self.arch, opt=self.opt.state_dict(),
+                         step=self.step_n, epoch=self.epoch, best=self.best, bad=self.bad)
+            path = os.path.join(self.out, "history.csv")
+            new = not os.path.exists(path)
+            with open(path, "a", newline="") as f:
+                w = csv.DictWriter(f, fieldnames=list(row))
+                if new:
+                    w.writeheader()
+                w.writerow(row)
         print(f"[{os.path.basename(self.out)}] epoch {self.epoch}/{self.sec['epochs']} "
               + " ".join(f"{k}={v:.4g}" for k, v in row.items() if k not in ("epoch",)) + (" *" if improved else ""))
         if self.on_epoch is not None:

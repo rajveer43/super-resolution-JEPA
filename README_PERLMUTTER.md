@@ -2,7 +2,7 @@
 
 This guide runs the whole SR-JEPA pipeline on Perlmutter GPU nodes and sends the results back. You need a NERSC account in a project that has GPU hours. Everything is set in **one file**, `slurm/settings.sh`, and you run **three commands**. Every job can be resubmitted safely, because each training stage resumes from its last checkpoint.
 
-What runs (one A100 per job; independent jobs run in parallel):
+What runs (`NGPUS` A100s per training job, one by default; independent jobs run in parallel):
 
 ```
 download + prepare ──> pretrain ──> latent SR ──> decoder ──> e2e (jepa init) ──┐
@@ -28,13 +28,14 @@ Usually you only change these:
 |---|---|
 | `ACCOUNT` | The NERSC project to charge. Run `iris` or see https://iris.nersc.gov for yours; some GPU allocations are named `mXXXX_g`. |
 | `CPU_ACCOUNT` | Optional: a project with CPU hours, so download and prepare don't use a GPU. |
+| `NGPUS` | GPUs per training job, data parallel on one node (1-4). `4` with `QOS=regular` takes a whole node. |
 | `DATASET` | `qg` (CMS jets) or `calo` (CaloChallenge DS2). |
 | `RUN_TAG` | A short name for what this experiment tests. Use a new one for each new experiment. |
 | `CFS_COPY` | Optional: a CFS directory the result tarball is copied to. |
 
 The defaults:
 - all events: 139k jets or 100k showers;
-- batch 256 on one A100, with learning rates scaled automatically;
+- global batch 256, split over the GPUs and capped per stage to what fits in memory (SR and e2e need far more memory per event than pretraining, so on one 40 GB GPU they run at 64 and 32); learning rates scale automatically;
 - early stopping after 5 epochs without improvement;
 - both ablations (`e2e_jepa` and `e2e_scratch`).
 
@@ -79,15 +80,22 @@ For each stage, `status.sh` prints the last row of `history.csv`. Watch these co
   ```bash
   bash slurm/submit_all.sh --from sr   # stages: prepare pretrain sr decoder probe e2e evaluate
   ```
+- **`CUDA out of memory` in the first step of a stage:** the batch of that stage does not fit. `BATCH` is capped per stage (`stage_batch_cap` in `slurm/common.sh`; the job log prints `batch sr: 256 -> 64 ...`). Lower the cap, raise `NGPUS`, or set `GPU_MEM=80`, then `bash slurm/submit_all.sh --from <stage>`.
 - **Evaluation needs only the decoder.** The probe and the ablations are optional: if one fails, evaluation still runs and leaves it out.
+
+## Several GPUs
+
+`NGPUS=4` (and `QOS=regular`, a whole node) runs pretrain, sr, decoder, probe and e2e with `torch.distributed.run`, one process per GPU. Each GPU holds a replica of the networks and a shard of the training split (a quarter of the 11.6 GB, instead of all of it), and the gradients are averaged after every step, so the global batch, the learning rate and the results do not depend on `NGPUS`; only the memory per GPU and the time per epoch do. `prepare`, `evaluate` and the Optuna studies stay on one GPU. Check the first lines of a log: `train: ... events per GPU (4 GPUs)`.
 
 ## 6. Results
 
 The evaluate job prints the summary table and packs `$ROOT/results_<dataset>_<experiment>.tar.gz`, which contains:
 - metrics, the summary, figures, every `history.csv`, the configs and the Slurm logs;
-- no checkpoints. To include the pretrained encoder and every `best.pt`, run:
+- no checkpoints. They are in `$ROOT/results_<dataset>_<experiment>_with_checkpoints.tar.gz`, which has the pretrained encoder and every `best.pt`; to make it by hand run:
   ```bash
   bash slurm/pack_results.sh <experiment> --with-checkpoints
   ```
 
-It is copied to `CFS_COPY` if that is set. Send the tarball back.
+A last job, `pack`, makes both tarballs after every other job of the experiment, **whether they succeeded or not**. Without it, one failed stage cancels `evaluate` (it depends on the decoder), nothing is packed, and the logs and checkpoints of the stages that did finish stay on `$SCRATCH`. The log of `pack` ends with a table of which stage has a history and checkpoints. A stage that crashed before its first epoch has no folder content at all.
+
+Both tarballs are copied to `CFS_COPY` if that is set. Send them back.

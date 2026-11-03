@@ -17,6 +17,7 @@ import numpy as np
 import torch
 from torch.utils.data import DataLoader, Dataset
 
+from .. import dist
 from .ops import sum_pool, uniform_upsample
 
 SPLITS = ("train", "val", "test")
@@ -60,21 +61,30 @@ class EventDataset(Dataset):
 FP16_MAX = 6.0e4
 
 
+def shard(n, rank=0, world=1):
+    """Rows of rank `rank` out of the first n: every world-th one, the same count on every rank (the remainder of
+    n / world is dropped), so all ranks take the same number of steps per epoch."""
+    n_local = n // world
+    return slice(rank, n_local * world, world), n_local
+
+
 class Preloaded:
     """A whole split in one tensor per array (GPU memory or RAM), batched by indexing: no per-event reads, no
     collation, no worker processes and, on the GPU, no host-to-device copies. Iterates like the DataLoader,
-    (index, hr, lr, target) in float32, with a fresh permutation every epoch."""
+    (index, hr, lr, target) in float32, with a fresh permutation every epoch. With world > 1 each rank holds only
+    its shard of the split (and `batch_size` is the rank's share of the global batch); the index is then local to
+    the shard."""
 
-    def __init__(self, cfg, split, batch_size, shuffle, max_n, device, dtype, seed=0):
+    def __init__(self, cfg, split, batch_size, shuffle, max_n, device, dtype, seed=0, rank=0, world=1):
         cache = cfg["paths"]["cache"]
         tgt = np.load(os.path.join(cache, f"{split}_target.npy"))
-        n = len(tgt) if max_n is None else min(int(max_n), len(tgt))
-        self.target = torch.as_tensor(tgt[:n], dtype=torch.float32, device=device)
-        self.hr = _load(os.path.join(cache, f"{split}_hr.npy"), n, device, dtype)
-        self.lr = _load(os.path.join(cache, f"{split}_lr.npy"), n, device, dtype)
+        rows, n = shard(len(tgt) if max_n is None else min(int(max_n), len(tgt)), rank, world)
+        self.target = torch.as_tensor(tgt[rows], dtype=torch.float32, device=device)
+        self.hr = _load(os.path.join(cache, f"{split}_hr.npy"), rows, n, device, dtype)
+        self.lr = _load(os.path.join(cache, f"{split}_lr.npy"), rows, n, device, dtype)
         self.n, self.bs, self.shuffle, self.device = n, batch_size, shuffle, device
         self.drop_last = shuffle and n >= batch_size
-        self.g = torch.Generator().manual_seed(int(cfg["seed"]) + seed)
+        self.g = torch.Generator().manual_seed(int(cfg["seed"]) + seed + 7919 * rank)
 
     def __len__(self):
         return self.n // self.bs if self.drop_last else -(-self.n // self.bs)
@@ -87,9 +97,10 @@ class Preloaded:
             yield i, self.hr[i].float(), self.lr[i].float(), self.target[i]
 
 
-def _load(path, n, device, dtype, chunk=4096):
-    """memmap -> tensor on `device`, chunk by chunk (never two full copies in memory)."""
-    m = np.load(path, mmap_mode="r")
+def _load(path, rows, n, device, dtype, chunk=4096):
+    """memmap rows (a slice of the first axis, n of them) -> tensor on `device`, chunk by chunk (never two full
+    copies in memory)."""
+    m = np.load(path, mmap_mode="r")[rows]
     out = torch.empty((n, *m.shape[1:]), dtype=dtype, device=device)
     for s in range(0, n, chunk):
         out[s:s + chunk] = torch.from_numpy(np.array(m[s:min(n, s + chunk)], dtype=np.float32))
@@ -121,10 +132,11 @@ def _free_ram():
         return 0
 
 
-def _placement(cfg, split, max_n, device):
+def _placement(cfg, split, max_n, device, world=1):
     """-> ('gpu' | 'cpu' | 'none', dtype). data.preload: auto | gpu | cpu | none. auto puts the split on the GPU
     when it takes < 35 % of its memory, else in RAM when it takes < 50 % of the free RAM, else streams it.
-    data.preload_dtype float16 halves the footprint (falls back to float32 if a value exceeds the fp16 range)."""
+    data.preload_dtype float16 halves the footprint (falls back to float32 if a value exceeds the fp16 range).
+    With world > 1 a rank holds 1 / world of the split."""
     d = cfg["data"]
     dtype = torch.float32
     if d.get("preload_dtype", "float32") == "float16":
@@ -138,8 +150,8 @@ def _placement(cfg, split, max_n, device):
     size = 0
     for what in ("hr", "lr"):
         m = np.load(os.path.join(cfg["paths"]["cache"], f"{split}_{what}.npy"), mmap_mode="r")
-        size += (len(m) if max_n is None else min(int(max_n), len(m))) * m[0].size * (2 if dtype == torch.float16
-                                                                                       else 4)
+        size += (len(m) if max_n is None else min(int(max_n), len(m))) // world * m[0].size * (
+            2 if dtype == torch.float16 else 4)
     if device.type == "cuda" and size < 0.35 * torch.cuda.get_device_properties(device).total_memory:
         return "gpu", dtype
     if size < 0.5 * _free_ram():
@@ -147,19 +159,27 @@ def _placement(cfg, split, max_n, device):
     return "none", dtype
 
 
-def make_loader(cfg, split, batch_size, shuffle, max_n=None, seed=0, device=None):
+def make_loader(cfg, split, batch_size, shuffle, max_n=None, seed=0, device=None, rank=None, world=None):
+    """batch_size is the global batch; with several ranks (dist.py) each one loads its own shard of the split and
+    iterates batches of batch_size / world."""
     device = torch.device(device or "cpu")
-    where, dtype = _placement(cfg, split, max_n, device)
+    rank, world = dist.rank() if rank is None else rank, dist.world() if world is None else world
+    bs = dist.local_batch(batch_size, world)
+    where, dtype = _placement(cfg, split, max_n, device, world)
     if where != "none":
-        loader = Preloaded(cfg, split, batch_size, shuffle, max_n, device if where == "gpu" else torch.device("cpu"),
-                           dtype, seed)
-        print(f"  {split}: {loader.n} events preloaded to {where} ({str(dtype).split('.')[-1]})")
+        loader = Preloaded(cfg, split, bs, shuffle, max_n, device if where == "gpu" else torch.device("cpu"),
+                           dtype, seed, rank, world)
+        print(f"  {split}: {loader.n} events{f' per GPU ({world} GPUs)' if world > 1 else ''} preloaded to {where} "
+              f"({str(dtype).split('.')[-1]})")
         return loader
     ds = EventDataset(cfg, split, max_n)
-    g = torch.Generator().manual_seed(int(cfg["seed"]) + seed)
+    if world > 1:
+        rows, n = shard(len(ds), rank, world)
+        ds = torch.utils.data.Subset(ds, range(len(ds))[rows])
+    g = torch.Generator().manual_seed(int(cfg["seed"]) + seed + 7919 * rank)
     nw = int(cfg["num_workers"])
     print(f"  {split}: {len(ds)} events streamed from the memmap cache ({nw} workers)")
-    return DataLoader(ds, batch_size=batch_size, shuffle=shuffle, drop_last=shuffle and len(ds) >= batch_size,
+    return DataLoader(ds, batch_size=bs, shuffle=shuffle, drop_last=shuffle and len(ds) >= bs,
                       num_workers=nw, persistent_workers=nw > 0, generator=g, pin_memory=torch.cuda.is_available())
 
 

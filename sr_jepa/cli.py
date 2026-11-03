@@ -16,9 +16,14 @@ tune_e2e (the studies of every init in e2e.inits). Each writes {out}/tuning/<stu
 later stage of the experiment uses (see load_config).
 """
 import argparse
+import os
+import sys
 
+from . import dist
 from .config import TUNE_STUDIES, load_config
 
+# stages that train and so can run data parallel (torchrun, see dist.py); the others need a single process
+DATA_PARALLEL = {"pretrain", "train_sr", "train_decoder", "train_probe", "train_e2e"}
 ORDER = ["download", "prepare", "pretrain", "train_sr", "train_decoder", "train_probe", "train_e2e", "evaluate"]
 TUNE_BEFORE = {"pretrain": ["tune_pretrain"], "train_sr": ["tune_sr"], "train_decoder": ["tune_decoder"],
                "train_probe": ["tune_probe"], "train_e2e": ["tune_e2e"]}
@@ -70,6 +75,14 @@ def main(argv=None):
     ap.add_argument("--force", action="store_true", help="rebuild the data cache")
     a = ap.parse_args(argv)
     stages = a.stages
+    dist.init()
+    if dist.active():
+        bad = [s for s in stages if s not in DATA_PARALLEL]
+        if bad:
+            raise SystemExit(f"{bad} cannot run on several GPUs; start them with one process (no torchrun), "
+                             f"data parallel stages: {sorted(DATA_PARALLEL)}")
+        if not dist.is_main():    # one copy of the log; errors still reach stderr
+            sys.stdout = open(os.devnull, "w")
     if stages == ["all"]:
         tuned = load_config(a.config, a.set)["tune"]["enabled"]
         stages = [t for s in ORDER for t in (TUNE_BEFORE.get(s, []) if tuned else []) + [s]]
@@ -77,6 +90,7 @@ def main(argv=None):
         print(f"\n===== {s} =====")
         # reloaded per stage: a study that just finished must reach the stages after it
         run_stage(s, load_config(a.config, a.set), a.force)
+    dist.shutdown()
 
 
 if __name__ == "__main__":
