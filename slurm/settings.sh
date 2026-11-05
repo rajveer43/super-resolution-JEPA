@@ -15,7 +15,7 @@ NGPUS=1                       # GPUs per training job (pretrain, sr, decoder, pr
 # ---- what to run ---------------------------------------------------------------------------------
 DATASET=qg                    # qg (CMS quark/gluon jets) | calo (CaloChallenge DS2)
 RUN_TAG=vjepa2-baseline       # what this experiment tests, in words joined by '-' (letters, digits, '-', '.')
-RUN_DATE=2026-11-05           # empty = today (Asia/Kolkata) -> new experiment; e.g. 2026-10-28 to resume one
+RUN_DATE=2026-11-03           # empty = today (Asia/Kolkata) -> new experiment; e.g. 2026-10-28 to resume one
                               # -> experiment folder <RUN_DATE>_<RUN_TAG>, e.g. 2026-10-28_vjepa2-baseline
 MAX_EVENTS=                   # empty = all (qg: 139k jets; calo: 100k showers from dataset_2_1)
 BATCH=256                     # GLOBAL batch size (all GPUs together), learning rates scale with sqrt(batch). Each stage
