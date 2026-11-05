@@ -227,8 +227,11 @@ for idx in "${!ENCODER_LIST[@]}"; do
     fi
     if wanted e2e; then
         if has_init scratch; then
-            tune e2e_scratch "$(dep "afterok:$P")"; T="$(tj e2e_scratch)"
-            ES=$(sub e2e-scratch "$TIME_E2E" 06_e2e.slurm "$(dep "afterok:$P" "afterany:$T")" E2E_INIT=scratch)
+            # scratch trains the sr + decoder networks too, so it waits for their tuned sizes (not their training)
+            tune e2e_scratch "$(dep "afterok:$P" "afterany:$(tj sr)" "afterany:$(tj decoder)")"
+            T="$(tj e2e_scratch)"
+            ES=$(sub e2e-scratch "$TIME_E2E" 06_e2e.slurm \
+                "$(dep "afterok:$P" "afterany:$T" "afterany:$(tj sr)" "afterany:$(tj decoder)")" E2E_INIT=scratch)
         fi
         if has_init jepa; then
             tune e2e_jepa "$(dep "afterok:$DEC")"; T="$(tj e2e_jepa)"

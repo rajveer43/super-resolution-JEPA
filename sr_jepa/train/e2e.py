@@ -26,6 +26,13 @@ def run(cfg, init, on_epoch=None):
     if init not in ("jepa", "scratch"):
         raise ValueError(f"e2e init must be jepa or scratch, not {init}")
     tuned_report(cfg, f"e2e_{init}")
+    # e2e trains the same networks as sr + decoder: when their sizes are tuned, wait for those values, or the
+    # checkpoint will not match the config at evaluation (this is what broke evaluate for e2e_scratch)
+    missing = [s for s in ("sr", "decoder") if s in (cfg["tune"].get("require") or [])
+               and not cfg["_tuned"]["applied"].get(s)]
+    if missing:
+        raise RuntimeError(f"tune.require lists {missing} but they have no best_params.json yet: e2e_{init} uses "
+                           f"their network sizes, so run tune_{missing[0]} first")
     device, meta, L = setup(cfg)
     sec = section(cfg, init)
     pipe = SRPipeline(cfg, L)

@@ -55,7 +55,18 @@ def run(cfg):
     variants = [v for v in VARIANTS if available(cfg, v)]
     if not variants:
         raise FileNotFoundError("no trained SR variant found: run pretrain, train_sr, train_decoder (or train_e2e)")
-    pipes = {v: load_pipeline(cfg, L, device, v) for v in variants}
+    # an ablation whose checkpoint no longer matches the config (e.g. trained before a tuned size existed) is
+    # skipped with a warning, so it cannot take the figures of the other variants down with it
+    pipes, skipped = {}, {}
+    for v in variants:
+        try:
+            pipes[v] = load_pipeline(cfg, L, device, v)
+        except (ValueError, RuntimeError) as e:
+            if v == "jepa":
+                raise
+            skipped[v] = str(e)
+            print(f"WARNING: skipping {v}: {e}\n  retrain it with the current config to include it")
+    variants = list(pipes)
     enc = frozen_encoder(cfg, L, device)
     probe = None
     probe_ck = os.path.join(cfg["paths"]["out"], "probe", "best.pt")
@@ -154,6 +165,8 @@ def run(cfg):
     metrics["hyperparameters"] = {"tuned": {k: v for k, v in cfg["_tuned"]["applied"].items()},
                                   "overridden_by_set": cfg["_tuned"]["overridden"],
                                   "encoder": cfg["encoder"]}
+    if skipped:
+        metrics["skipped_variants"] = skipped
 
     with open(os.path.join(out, "metrics.json"), "w") as f:
         json.dump(metrics, f, indent=2)
@@ -225,6 +238,9 @@ def summary_markdown(metrics, methods):
             lines.append("No tuned values: every stage used the config values.")
         for key, o in hp["overridden_by_set"].items():
             lines.append(f"- tuned `{key}`={_fmt(o['tuned'])} was overridden by --set to {_fmt(o['set'])}")
+    for v, why in (metrics.get("skipped_variants") or {}).items():
+        lines += ["", f"**{v} was skipped**: its checkpoint does not match the current config. "
+                      f"Retrain it to include it.", "", "```", why, "```"]
     return "\n".join(lines) + "\n"
 
 
